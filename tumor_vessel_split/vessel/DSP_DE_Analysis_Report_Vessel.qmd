@@ -1,0 +1,1760 @@
+---
+title: "DSP DE Analysis - Tosato"
+format:
+  html:
+    code-fold: true
+editor: visual
+
+params:
+  data.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/"
+  QC.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/tumor_vessel_split/vessel/QC/"
+  results.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/tumor_vessel_split/vessel/DE"
+  run.folder: "9_11_24/"
+  DSP.analysis.folder: "/Users/cauleyes/CPTR/DSP_Analysis/"
+---
+
+# DE Analysis - Vessel
+
+```{r Setup}
+#| warning: false
+#| message: false
+
+library(GeomxTools)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(stringr)
+library(PCAtools)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(DSPWorkflow)
+library(VennDiagram)
+library(gt)
+
+
+
+results.folder <- "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/tumor_vessel_split/vessel/DE/"
+data.folder <- "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/"
+QC.folder <- "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/tumor_vessel_split/vessel/QC/"
+run.folder <- "9_11_24/"
+DSP.analysis.folder <- "/Users/cauleyes/CPTR/DSP_Analysis/"
+
+# Source the helper functions
+source(paste0(DSP.analysis.folder, "DSP_functions.R"))
+
+# Set up the previous DE results for faster plot creation
+DE.results.folder <- paste0(results.folder, run.folder)
+DE.results.files <- list.files(DE.results.folder)
+```
+
+### Load the Normalized Counts and Annotation
+
+```{r Load Normalized Counts}
+
+normalized.object.list <- get(load(file = paste0(params$QC.folder,
+                                       "Tosato_q3_object_vessel.RDA")))
+
+#normalized.counts <- read.csv(paste0(params$QC.folder, 
+#                                     "Tosato_quantile_counts_vessel.csv"))
+
+# Adjust the column names to match the annotation
+#colnames(normalized.counts) <- gsub("\\.dcc", "", colnames(normalized.counts))
+#colnames(normalized.counts) <- gsub("\\.", "-", colnames(normalized.counts))
+#normalized.counts <- normalized.counts %>% 
+#  mutate(gene = X, .before = 1) %>% 
+#  select(-X)
+
+#str(normalized.counts)
+
+# Load the annotation
+#annotation <- read.csv(paste0(params$QC.folder, 
+#                                     "Tosato_filtered_annotation_vessel.csv"))
+# Adjust the column names
+#colnames(annotation) <- gsub("\\.", "_", colnames(annotation))
+```
+
+### Set up the Annotation Colors
+
+```{r Annotation Colors}
+
+# Set up annotation colors for the heatmaps
+anno.colors = list(
+      Treatment_group = c(C = "slateblue", 
+                T1 = "coral", 
+                T2 = "seagreen1", 
+                T3 = "cadetblue1", 
+                T4 = "pink")
+      )
+```
+
+### Run DE
+
+#### T1 vs. C
+
+```{r DE contrast: T1 vs. C}
+#| warning: false
+#| message: false
+
+# Setup annotation groups for the contrast
+# Order is Condition, Reference
+contrast.groups <- c("T1", "C")
+
+contrast.field <- "Treatment_group"
+
+# Define the name of the contrast
+contrast.name <- paste0(contrast.groups[[2]], 
+                        "_", 
+                        contrast.groups[[1]])
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list()
+
+contrast.groups.list[[contrast.field]] = contrast.groups
+ 
+
+
+# Filter data for the chosen annotations
+object <- normalized.object.list$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_object_for_lmm(object = object, 
+                            subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group") 
+print(summary.table)
+
+# Check if the DE results have already been generated
+DE.result.file <- grepl(contrast.name, DE.results.files)
+if(sum(DE.result.file) == 1) {
+  
+  # Load the previously generated DE results
+  results.df <- as.data.frame(read.csv(paste0(results.folder, run.folder, contrast.name, "_de.results.csv")))
+                              
+} else {
+  # Use the function from the DSPWorkflow package
+
+  # Within slide analysis
+  # Listed contrasts are condition, reference 
+  results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "Treatment_group", 
+                        regions = c("T1", "C"), 
+                        group.col = "region", 
+                        groups = c("vessels"), 
+                        n.cores = parallel::detectCores())
+  
+  # Create the results df
+  results.df <- results.list$results
+  
+  write.results <- TRUE
+  if(write.results == TRUE){
+    write.csv(results.df, paste0(results.folder, run.folder, contrast.name, "_de.results.csv"))
+  }
+  
+  
+}
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+export.deg.list <- FALSE
+if(export.deg.list == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, "DE/DEG_lists/", contrast.name, "_deg_list.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output.strict <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T1", 
+                               x.axis.title = "logFC: C (Ref) versus T1 (Cond)", 
+                               fc.limit = 1, 
+                               pos.label.limit = 1, 
+                               neg.label.limit = -1)
+
+print(volcano.output.strict$volcano.plot)
+
+# Export the volcano
+export.volcano <- FALSE
+if(export.volcano == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, "DE/volcano/", contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+# Make the heatmap
+
+# Define new annotations if needed
+#anno.colors = list(region = c(tumor = "pink",
+#                 interstitial = "seagreen1", 
+#                 healthyepithelium = "cadetblue1",
+#                 cluster = "darkorange"), 
+#      segment = c(PanCK = "lightsalmon", 
+#                  Myeloid = "darkolivegreen1", 
+#                  other_cells = "lightblue"))
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors)) %>% 
+  arrange(Treatment_group)
+
+# Order the annotation
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$Treatment_group), ]
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$segment), ]
+
+heatmap.plot.strict <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 1, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.strict)
+
+volcano.output.loose <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T1", 
+                               x.axis.title = "logFC: C (Ref) versus T1 (Cond)", 
+                               fc.limit = 0.5, 
+                               pos.label.limit = 0.5, 
+                               neg.label.limit = -0.5)
+
+print(volcano.output.loose$volcano.plot)
+
+heatmap.plot.loose <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 0.5, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.loose)
+
+export.heatmap <- FALSE
+if(export.heatmap == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, "DE/heatmap/", contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+
+```
+
+#### T2 vs. C
+
+```{r DE contrast: T2 vs. C}
+#| warning: false
+#| message: false
+
+# Setup annotation groups for the contrast
+# Order is Condition, Reference
+contrast.groups <- c("T2", "C")
+
+contrast.field <- "Treatment_group"
+
+# Define the name of the contrast
+contrast.name <- paste0(contrast.groups[[2]], 
+                        "_", 
+                        contrast.groups[[1]])
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list()
+
+contrast.groups.list[[contrast.field]] = contrast.groups
+ 
+
+
+# Filter data for the chosen annotations
+object <- normalized.object.list$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_object_for_lmm(object = object, 
+                            subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print(summary.table)
+
+# Check if the DE results have already been generated
+DE.result.file <- grepl(contrast.name, DE.results.files)
+if(sum(DE.result.file) == 1) {
+  
+  # Load the previously generated DE results
+  results.df <- as.data.frame(read.csv(paste0(results.folder, run.folder, contrast.name, "_de.results.csv")))
+                              
+} else {
+  # Use the function from the DSPWorkflow package
+
+  # Within slide analysis
+  # Listed contrasts are condition, reference 
+  results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "Treatment_group", 
+                        regions = c("T2", "C"), 
+                        group.col = "region", 
+                        groups = c("vessels"), 
+                        n.cores = parallel::detectCores())
+  
+  # Create the results df
+  results.df <- results.list$results
+  
+  write.results <- TRUE
+  if(write.results == TRUE){
+    write.csv(results.df, paste0(results.folder, run.folder, contrast.name, "_de.results.csv"))
+  }
+  
+  
+}
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+export.deg.list <- FALSE
+if(export.deg.list == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, "DE/DEG_lists/", contrast.name, "_deg_list.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output.strict <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T2", 
+                               x.axis.title = "logFC: C (Ref) versus T2 (Cond)", 
+                               fc.limit = 1, 
+                               pos.label.limit = 1, 
+                               neg.label.limit = -1)
+
+print(volcano.output.strict$volcano.plot)
+
+# Export the volcano
+export.volcano <- FALSE
+if(export.volcano == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, "DE/volcano/", contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+# Make the heatmap
+
+# Define new annotations if needed
+#anno.colors = list(region = c(tumor = "pink",
+#                 interstitial = "seagreen1", 
+#                 healthyepithelium = "cadetblue1",
+#                 cluster = "darkorange"), 
+#      segment = c(PanCK = "lightsalmon", 
+#                  Myeloid = "darkolivegreen1", 
+#                  other_cells = "lightblue"))
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors)) %>% 
+  arrange(Treatment_group)
+
+# Order the annotation
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$Treatment_group), ]
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$segment), ]
+
+heatmap.plot.strict <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 1, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.strict)
+
+volcano.output.loose <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T2", 
+                               x.axis.title = "logFC: C (Ref) versus T2 (Cond)", 
+                               fc.limit = 0.5, 
+                               pos.label.limit = 0.5, 
+                               neg.label.limit = -0.5)
+
+print(volcano.output.loose$volcano.plot)
+
+heatmap.plot.loose <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 0.5, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.loose)
+
+export.heatmap <- FALSE
+if(export.heatmap == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, "DE/heatmap/", contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+```
+
+#### T3 vs. C
+
+```{r DE contrast: T3 vs. C}
+#| warning: false
+#| message: false
+
+# Setup annotation groups for the contrast
+# Order is Condition, Reference
+contrast.groups <- c("T3", "C")
+
+contrast.field <- "Treatment_group"
+
+# Define the name of the contrast
+contrast.name <- paste0(contrast.groups[[2]], 
+                        "_", 
+                        contrast.groups[[1]])
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list()
+
+contrast.groups.list[[contrast.field]] = contrast.groups
+ 
+
+
+# Filter data for the chosen annotations
+object <- normalized.object.list$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_object_for_lmm(object = object, 
+                            subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print(summary.table)
+
+# Check if the DE results have already been generated
+DE.result.file <- grepl(contrast.name, DE.results.files)
+if(sum(DE.result.file) == 1) {
+  
+  # Load the previously generated DE results
+  results.df <- as.data.frame(read.csv(paste0(results.folder, run.folder, contrast.name, "_de.results.csv")))
+                              
+} else {
+  # Use the function from the DSPWorkflow package
+
+  # Within slide analysis
+  # Listed contrasts are condition, reference 
+  results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "Treatment_group", 
+                        regions = c("T3", "C"), 
+                        group.col = "region", 
+                        groups = c("vessels"), 
+                        n.cores = parallel::detectCores())
+  
+  # Create the results df
+  results.df <- results.list$results
+  
+  write.results <- TRUE
+  if(write.results == TRUE){
+    write.csv(results.df, paste0(results.folder, run.folder, contrast.name, "_de.results.csv"))
+  }
+  
+  
+}
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+export.deg.list <- FALSE
+if(export.deg.list == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, "DE/DEG_lists/", contrast.name, "_deg_list.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output.strict <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T3", 
+                               x.axis.title = "logFC: C (Ref) versus T3 (Cond)", 
+                               fc.limit = 1, 
+                               pos.label.limit = 1, 
+                               neg.label.limit = -1)
+
+print(volcano.output.strict$volcano.plot)
+
+# Export the volcano
+export.volcano <- FALSE
+if(export.volcano == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, "DE/volcano/", contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+# Make the heatmap
+
+# Define new annotations if needed
+#anno.colors = list(region = c(tumor = "pink",
+#                 interstitial = "seagreen1", 
+#                 healthyepithelium = "cadetblue1",
+#                 cluster = "darkorange"), 
+#      segment = c(PanCK = "lightsalmon", 
+#                  Myeloid = "darkolivegreen1", 
+#                  other_cells = "lightblue"))
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors)) %>% 
+  arrange(Treatment_group)
+
+# Order the annotation
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$Treatment_group), ]
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$segment), ]
+
+heatmap.plot.strict <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 1, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.strict)
+
+volcano.output.loose <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T3", 
+                               x.axis.title = "logFC: C (Ref) versus T3 (Cond)", 
+                               fc.limit = 0.5, 
+                               pos.label.limit = 0.5, 
+                               neg.label.limit = -0.5)
+
+print(volcano.output.loose$volcano.plot)
+
+heatmap.plot.loose <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 0.5, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.loose)
+
+
+export.heatmap <- FALSE
+if(export.heatmap == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, "DE/heatmap/", contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+```
+
+#### T4 vs. C
+
+```{r DE contrast: T4 vs. C}
+#| warning: false
+#| message: false
+
+# Setup annotation groups for the contrast
+# Order is Condition, Reference
+contrast.groups <- c("T4", "C")
+
+contrast.field <- "Treatment_group"
+
+# Define the name of the contrast
+contrast.name <- paste0(contrast.groups[[2]], 
+                        "_", 
+                        contrast.groups[[1]])
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list()
+
+contrast.groups.list[[contrast.field]] = contrast.groups
+ 
+
+
+# Filter data for the chosen annotations
+object <- normalized.object.list$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_object_for_lmm(object = object, 
+                            subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print(summary.table)
+
+# Check if the DE results have already been generated
+DE.result.file <- grepl(contrast.name, DE.results.files)
+if(sum(DE.result.file) == 1) {
+  
+  # Load the previously generated DE results
+  results.df <- as.data.frame(read.csv(paste0(results.folder, run.folder, contrast.name, "_de.results.csv")))
+                              
+} else {
+  # Use the function from the DSPWorkflow package
+
+  # Within slide analysis
+  # Listed contrasts are condition, reference 
+  results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "Treatment_group", 
+                        regions = c("T4", "C"), 
+                        group.col = "region", 
+                        groups = c("vessels"), 
+                        n.cores = parallel::detectCores())
+  
+  # Create the results df
+  results.df <- results.list$results
+  
+  write.results <- FALSE
+  if(write.results == TRUE){
+    write.csv(results.df, paste0(results.folder, run.folder, contrast.name, "_de.results.csv"))
+  }
+  
+  
+}
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+export.deg.list <- FALSE
+if(export.deg.list == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, "DE/DEG_lists/", contrast.name, "_deg_list.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output.strict <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T4", 
+                               x.axis.title = "logFC: C (Ref) versus T4 (Cond)", 
+                               fc.limit = 1, 
+                               pos.label.limit = 1, 
+                               neg.label.limit = -1)
+
+print(volcano.output.strict$volcano.plot)
+
+# Export the volcano
+export.volcano <- FALSE
+if(export.volcano == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, "DE/volcano/", contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+# Make the heatmap
+
+# Define new annotations if needed
+#anno.colors = list(region = c(tumor = "pink",
+#                 interstitial = "seagreen1", 
+#                 healthyepithelium = "cadetblue1",
+#                 cluster = "darkorange"), 
+#      segment = c(PanCK = "lightsalmon", 
+#                  Myeloid = "darkolivegreen1", 
+#                  other_cells = "lightblue"))
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors)) %>% 
+  arrange(Treatment_group)
+
+# Order the annotation
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$Treatment_group), ]
+#annotation.heatmap <- annotation.heatmap[order(annotation.heatmap$segment), ]
+
+heatmap.plot.strict <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 1, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.strict)
+
+volcano.output.loose <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "Expression in T4", 
+                               x.axis.title = "logFC: C (Ref) versus T4 (Cond)", 
+                               fc.limit = 0.5, 
+                               pos.label.limit = 0.5, 
+                               neg.label.limit = -0.5)
+
+print(volcano.output.loose$volcano.plot)
+
+heatmap.plot.loose <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  logfc.column = "logfc", 
+  logfc.cutoff = 0.5, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = TRUE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.colnames = FALSE, 
+  show.rownames = TRUE)
+
+print(heatmap.plot.loose)
+
+export.heatmap <- FALSE
+if(export.heatmap == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, "DE/heatmap/", contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+```
+
+### Venn Diagrams for log FC cutoff of 1
+
+```{r Setup Gene Lists log FC 1}
+#| warning: false
+#| message: false
+
+# Load all DE results
+results.files <- list.files(paste0(results.folder, run.folder))
+
+up.results.list <- list()
+down.results.list <- list()
+
+logfc.cutoff <- 1
+
+results.files <- results.files[grepl(".csv", results.files)]
+
+
+for(file in results.files){
+  
+  # Load the results for a DE contrast
+  de.results <- as.data.frame(read.csv(paste0(results.folder, run.folder, file)))
+  
+  # Filter for DEGs for up and down regulated
+  logfc.column <- colnames(de.results)[grep("logFC", colnames(de.results))]
+  adj.pval.column <- colnames(de.results)[grep("adjpval", colnames(de.results))]
+  
+  up.degs.data <- de.results %>% 
+    filter(.data[[logfc.column]] > logfc.cutoff) %>% 
+    filter(.data[[adj.pval.column]] < 0.05)
+  
+  down.degs.data <- de.results %>% 
+  filter(.data[[logfc.column]] < -(logfc.cutoff)) %>% 
+  filter(.data[[adj.pval.column]] < 0.05)
+  
+  # Gather the DE gene names and store
+  up.degs <- up.degs.data$Gene
+  down.degs <- down.degs.data$Gene
+  
+  contrast.name <- gsub("_de.results.csv", "", file)
+  contrast.name <- gsub("_", " vs. ", contrast.name)
+  
+  if(length(up.degs) > 0){
+    
+    up.results.list[[contrast.name]] <- up.degs
+    
+  } else {
+    
+    # For group with no DEGs
+    up.results.list[[contrast.name]] <- "no DEGs"
+    
+  }
+  
+  if(length(down.degs) > 0){
+    
+    down.results.list[[contrast.name]] <- down.degs
+    
+  } else {
+    
+    # For group with no DEGs
+    down.results.list[[contrast.name]] <- "no DEGs"
+    
+  }
+  
+}
+
+```
+
+#### Up-regulated Venn Diagram
+
+```{r Create venn diagram for up degs log FC 1}
+#| warning: false
+#| message: false
+
+
+venn.up.degs <- venn.diagram(up.results.list, 
+                            main = "Up-regulated DEGs each DE Contrast",
+                            category.names = c(names(up.results.list)[1],
+                                               names(up.results.list)[2], 
+                                               names(up.results.list)[3], 
+                                               names(up.results.list)[4]), 
+                            fill = c("maroon", 
+                                     "#E69F00", 
+                                     "#56B4E9", 
+                                     "#009E73"), 
+                            filename = NULL)
+
+
+grid.draw(venn.up.degs)
+
+```
+
+```{r Create table for up degs log FC 1}
+#| warning: false
+#| message: false
+
+# Create a table for genes in each category
+
+# Calculate the intersections and differences
+
+# Single Sets
+only_set1 <- setdiff(up.results.list[[1]], 
+                     union(up.results.list[[2]], 
+                           union(up.results.list[[3]], 
+                                 up.results.list[[4]])))
+only_set2 <- setdiff(up.results.list[[2]], 
+                     union(up.results.list[[1]], 
+                           union(up.results.list[[3]], 
+                                 up.results.list[[4]])))
+only_set3 <- setdiff(up.results.list[[3]], 
+                     union(up.results.list[[1]], 
+                           union(up.results.list[[2]], 
+                                 up.results.list[[4]])))
+only_set4 <- setdiff(up.results.list[[4]], 
+                     union(up.results.list[[1]], 
+                           union(up.results.list[[2]], 
+                                 up.results.list[[3]])))
+
+# Two Sets
+set1_set2 <- intersect(up.results.list[[1]], 
+                       up.results.list[[2]])
+set1_set3 <- intersect(up.results.list[[1]], 
+                       up.results.list[[3]])
+set1_set4 <- intersect(up.results.list[[1]], 
+                       up.results.list[[4]])
+set2_set3 <- intersect(up.results.list[[2]], 
+                       up.results.list[[3]])
+set2_set4 <- intersect(up.results.list[[2]], 
+                       up.results.list[[4]])
+set3_set4 <- intersect(up.results.list[[3]], 
+                       up.results.list[[4]])
+
+# Three Sets
+# Three-set overlaps
+set1_set2_set3 <- Reduce(intersect, 
+                         list(up.results.list[[1]], 
+                              up.results.list[[2]], 
+                              up.results.list[[3]])) %>% setdiff(up.results.list[[4]])
+set1_set2_set4 <- Reduce(intersect, 
+                         list(up.results.list[[1]], 
+                              up.results.list[[2]], 
+                              up.results.list[[4]])) %>% setdiff(up.results.list[[3]])
+set1_set3_set4 <- Reduce(intersect, 
+                         list(up.results.list[[1]], 
+                              up.results.list[[3]], 
+                              up.results.list[[4]])) %>% setdiff(up.results.list[[2]])
+set2_set3_set4 <- Reduce(intersect, 
+                         list(up.results.list[[2]], 
+                              up.results.list[[3]], 
+                              up.results.list[[4]])) %>% setdiff(up.results.list[[1]])
+
+# All Sets
+all_four_sets <- Reduce(intersect, 
+                        list(up.results.list[[1]], 
+                             up.results.list[[2]], 
+                             up.results.list[[3]], 
+                             up.results.list[[4]]))
+
+# Organize the results in a data frame
+venn.data <- data.frame(
+  "Category" = c(paste0("Only in ", names(up.results.list)[1]), 
+                 paste0("Only in ", names(up.results.list)[2]), 
+                 paste0("Only in ", names(up.results.list)[3]), 
+                 paste0("Only in ", names(up.results.list)[4]),
+                 paste0(names(up.results.list)[1], 
+                        " and ", 
+                        names(up.results.list)[2]), 
+                 paste0(names(up.results.list)[1], 
+                        " and ", 
+                        names(up.results.list)[3]), 
+                 paste0(names(up.results.list)[1], 
+                        " and ", 
+                        names(up.results.list)[4]),
+                 paste0(names(up.results.list)[2], 
+                        " and ", 
+                        names(up.results.list)[3]), 
+                 paste0(names(up.results.list)[2], 
+                        " and ", 
+                        names(up.results.list)[4]), 
+                 paste0(names(up.results.list)[3], 
+                        " and ", 
+                        names(up.results.list)[4]), 
+                 paste(names(up.results.list)[1], 
+                       names(up.results.list)[2], 
+                       names(up.results.list)[3], 
+                       sep = ", "), 
+                 paste(names(up.results.list)[1], 
+                       names(up.results.list)[2], 
+                       names(up.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(up.results.list)[1], 
+                       names(up.results.list)[3], 
+                       names(up.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(up.results.list)[2], 
+                       names(up.results.list)[3], 
+                       names(up.results.list)[4], 
+                       sep = ", "),
+                 "All four contrasts"),
+  "Genes" = c(
+    paste(only_set1, collapse = ", "), paste(only_set2, collapse = ", "), 
+    paste(only_set3, collapse = ", "), paste(only_set4, collapse = ", "),
+    paste(set1_set2, collapse = ", "), paste(set1_set3, collapse = ", "),
+    paste(set1_set4, collapse = ", "), paste(set2_set3, collapse = ", "),
+    paste(set2_set4, collapse = ", "), paste(set3_set4, collapse = ", "),
+    paste(set1_set2_set3, collapse = ", "), paste(set1_set2_set4, collapse = ", "),
+    paste(set1_set3_set4, collapse = ", "), paste(set2_set3_set4, collapse = ", "),
+    paste(all_four_sets, collapse = ", ")
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+# Create a gt table
+venn_gt_table <- venn.data %>%
+  gt() %>%
+  tab_header(
+    title = "Up-regulated Gene Overlaps by Contrast",
+    subtitle = "Genes in Venn Diagram Intersections"
+  ) %>%
+  cols_label(
+    Category = "Venn Section",
+    Genes = "Gene Names"
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgreen")
+    ),
+    locations = cells_body(
+      rows = Genes != ""
+    )
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "lightcoral")
+    ),
+    locations = cells_body(
+      rows = Genes == "no DEGs"
+    )
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "grey")
+    ),
+    locations = cells_body(
+      rows = Genes == ""
+    )
+  )
+
+# Print the gt table
+venn_gt_table
+
+```
+
+#### Down-regulated Venn Diagram
+
+```{r Create venn diagram for down degs log FC 1}
+#| warning: false
+#| message: false
+
+
+venn.down.degs <- venn.diagram(down.results.list, 
+                            main = "Down-regulated DEGs each DE Contrast",
+                            category.names = c(names(down.results.list)[1],
+                                               names(down.results.list)[2], 
+                                               names(down.results.list)[3], 
+                                               names(down.results.list)[4]), 
+                            fill = c("maroon", 
+                                     "#E69F00", 
+                                     "#56B4E9", 
+                                     "#009E73"), 
+                            filename = NULL)
+
+
+grid.draw(venn.down.degs)
+
+```
+
+```{r Create table for down degs log FC 1}
+#| warning: false
+#| message: false
+
+# Create a table for genes in each category
+
+# Calculate the intersections and differences
+
+# Single Sets
+only_set1 <- setdiff(down.results.list[[1]], 
+                     union(down.results.list[[2]], 
+                           union(down.results.list[[3]], 
+                                 down.results.list[[4]])))
+only_set2 <- setdiff(down.results.list[[2]], 
+                     union(down.results.list[[1]], 
+                           union(down.results.list[[3]], 
+                                 down.results.list[[4]])))
+only_set3 <- setdiff(down.results.list[[3]], 
+                     union(down.results.list[[1]], 
+                           union(down.results.list[[2]], 
+                                 down.results.list[[4]])))
+only_set4 <- setdiff(down.results.list[[4]], 
+                     union(down.results.list[[1]], 
+                           union(down.results.list[[2]], 
+                                 down.results.list[[3]])))
+
+# Two Sets
+set1_set2 <- intersect(down.results.list[[1]], 
+                       down.results.list[[2]])
+set1_set3 <- intersect(down.results.list[[1]], 
+                       down.results.list[[3]])
+set1_set4 <- intersect(down.results.list[[1]], 
+                       down.results.list[[4]])
+set2_set3 <- intersect(down.results.list[[2]], 
+                       down.results.list[[3]])
+set2_set4 <- intersect(down.results.list[[2]], 
+                       down.results.list[[4]])
+set3_set4 <- intersect(down.results.list[[3]], 
+                       down.results.list[[4]])
+
+# Three Sets
+# Three-set overlaps
+set1_set2_set3 <- Reduce(intersect, 
+                         list(down.results.list[[1]], 
+                              down.results.list[[2]], 
+                              down.results.list[[3]])) %>% setdiff(down.results.list[[4]])
+set1_set2_set4 <- Reduce(intersect, 
+                         list(down.results.list[[1]], 
+                              down.results.list[[2]], 
+                              down.results.list[[4]])) %>% setdiff(down.results.list[[3]])
+set1_set3_set4 <- Reduce(intersect, 
+                         list(down.results.list[[1]], 
+                              down.results.list[[3]], 
+                              down.results.list[[4]])) %>% setdiff(down.results.list[[2]])
+set2_set3_set4 <- Reduce(intersect, 
+                         list(down.results.list[[2]], 
+                              down.results.list[[3]], 
+                              down.results.list[[4]])) %>% setdiff(down.results.list[[1]])
+
+# All Sets
+all_four_sets <- Reduce(intersect, 
+                        list(down.results.list[[1]], 
+                             down.results.list[[2]], 
+                             down.results.list[[3]], 
+                             down.results.list[[4]]))
+
+# Organize the results in a data frame
+venn.data <- data.frame(
+  "Category" = c(paste0("Only in ", names(down.results.list)[1]), 
+                 paste0("Only in ", names(down.results.list)[2]), 
+                 paste0("Only in ", names(down.results.list)[3]), 
+                 paste0("Only in ", names(down.results.list)[4]),
+                 paste0(names(down.results.list)[1], 
+                        " and ", 
+                        names(down.results.list)[2]), 
+                 paste0(names(down.results.list)[1], 
+                        " and ", 
+                        names(down.results.list)[3]), 
+                 paste0(names(down.results.list)[1], 
+                        " and ", 
+                        names(down.results.list)[4]),
+                 paste0(names(down.results.list)[2], 
+                        " and ", 
+                        names(down.results.list)[3]), 
+                 paste0(names(down.results.list)[2], 
+                        " and ", 
+                        names(down.results.list)[4]), 
+                 paste0(names(down.results.list)[3], 
+                        " and ", 
+                        names(down.results.list)[4]), 
+                 paste(names(down.results.list)[1], 
+                       names(down.results.list)[2], 
+                       names(down.results.list)[3], 
+                       sep = ", "), 
+                 paste(names(down.results.list)[1], 
+                       names(down.results.list)[2], 
+                       names(down.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(down.results.list)[1], 
+                       names(down.results.list)[3], 
+                       names(down.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(down.results.list)[2], 
+                       names(down.results.list)[3], 
+                       names(down.results.list)[4], 
+                       sep = ", "),
+                 "All four contrasts"),
+  "Genes" = c(
+    paste(only_set1, collapse = ", "), paste(only_set2, collapse = ", "), 
+    paste(only_set3, collapse = ", "), paste(only_set4, collapse = ", "),
+    paste(set1_set2, collapse = ", "), paste(set1_set3, collapse = ", "),
+    paste(set1_set4, collapse = ", "), paste(set2_set3, collapse = ", "),
+    paste(set2_set4, collapse = ", "), paste(set3_set4, collapse = ", "),
+    paste(set1_set2_set3, collapse = ", "), paste(set1_set2_set4, collapse = ", "),
+    paste(set1_set3_set4, collapse = ", "), paste(set2_set3_set4, collapse = ", "),
+    paste(all_four_sets, collapse = ", ")
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+# Create a gt table
+venn_gt_table <- venn.data %>%
+  gt() %>%
+  tab_header(
+    title = "Down-regulated Gene Overlaps by Contrast",
+    subtitle = "Genes in Venn Diagram Intersections"
+  ) %>%
+  cols_label(
+    Category = "Venn Section",
+    Genes = "Gene Names"
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgreen")
+    ),
+    locations = cells_body(
+      rows = Genes != ""
+    )
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "lightcoral")
+    ),
+    locations = cells_body(
+      rows = Genes == "no DEGs"
+    )
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "grey")
+    ),
+    locations = cells_body(
+      rows = Genes == ""
+    )
+  )
+
+# Print the gt table
+venn_gt_table
+
+
+```
+
+### Venn Diagrams for log FC cutoff of 0.5
+
+```{r Setup Gene Lists log FC 0.5}
+#| warning: false
+#| message: false
+
+# Load all DE results
+results.files <- list.files(paste0(results.folder, run.folder))
+results.files <- results.files[grepl(".csv", results.files)]
+
+up.results.list <- list()
+down.results.list <- list()
+
+logfc.cutoff <- 0.5
+
+for(file in results.files){
+  
+  # Load the results for a DE contrast
+  de.results <- as.data.frame(read.csv(paste0(results.folder, run.folder, file)))
+  
+  # Filter for DEGs for up and down regulated
+  logfc.column <- colnames(de.results)[grep("logFC", colnames(de.results))]
+  adj.pval.column <- colnames(de.results)[grep("adjpval", colnames(de.results))]
+  
+  up.degs.data <- de.results %>% 
+    filter(.data[[logfc.column]] > logfc.cutoff) %>% 
+    filter(.data[[adj.pval.column]] < 0.05)
+  
+  down.degs.data <- de.results %>% 
+  filter(.data[[logfc.column]] < -(logfc.cutoff)) %>% 
+  filter(.data[[adj.pval.column]] < 0.05)
+  
+  # Gather the DE gene names and store
+  up.degs <- up.degs.data$Gene
+  down.degs <- down.degs.data$Gene
+  
+  contrast.name <- gsub("_de.results.csv", "", file)
+  contrast.name <- gsub("_", " vs. ", contrast.name)
+  
+  if(length(up.degs) > 0){
+    
+    up.results.list[[contrast.name]] <- up.degs
+    
+  } else {
+    
+    # For group with no DEGs
+    up.results.list[[contrast.name]] <- "no DEGs"
+    
+  }
+  
+  if(length(down.degs) > 0){
+    
+    down.results.list[[contrast.name]] <- down.degs
+    
+  } else {
+    
+    # For group with no DEGs
+    down.results.list[[contrast.name]] <- "no DEGs"
+    
+  }
+  
+}
+
+```
+
+#### Up-regulated Venn Diagram
+
+```{r Create venn diagram for up degs log FC 0.5}
+#| warning: false
+#| message: false
+
+
+venn.up.degs <- venn.diagram(up.results.list, 
+                            main = "Up-regulated DEGs each DE Contrast",
+                            category.names = c(names(up.results.list)[1],
+                                               names(up.results.list)[2], 
+                                               names(up.results.list)[3], 
+                                               names(up.results.list)[4]), 
+                            fill = c("maroon", 
+                                     "#E69F00", 
+                                     "#56B4E9", 
+                                     "#009E73"), 
+                            filename = NULL)
+
+
+grid.draw(venn.up.degs)
+
+
+```
+
+```{r Create table for up degs log FC 0.5}
+#| warning: false
+#| message: false
+
+# Create a table for genes in each category
+
+# Calculate the intersections and differences
+
+# Single Sets
+only_set1 <- setdiff(up.results.list[[1]], 
+                     union(up.results.list[[2]], 
+                           union(up.results.list[[3]], 
+                                 up.results.list[[4]])))
+only_set2 <- setdiff(up.results.list[[2]], 
+                     union(up.results.list[[1]], 
+                           union(up.results.list[[3]], 
+                                 up.results.list[[4]])))
+only_set3 <- setdiff(up.results.list[[3]], 
+                     union(up.results.list[[1]], 
+                           union(up.results.list[[2]], 
+                                 up.results.list[[4]])))
+only_set4 <- setdiff(up.results.list[[4]], 
+                     union(up.results.list[[1]], 
+                           union(up.results.list[[2]], 
+                                 up.results.list[[3]])))
+
+# Two Sets
+set1_set2 <- intersect(up.results.list[[1]], 
+                       up.results.list[[2]])
+set1_set3 <- intersect(up.results.list[[1]], 
+                       up.results.list[[3]])
+set1_set4 <- intersect(up.results.list[[1]], 
+                       up.results.list[[4]])
+set2_set3 <- intersect(up.results.list[[2]], 
+                       up.results.list[[3]])
+set2_set4 <- intersect(up.results.list[[2]], 
+                       up.results.list[[4]])
+set3_set4 <- intersect(up.results.list[[3]], 
+                       up.results.list[[4]])
+
+# Three Sets
+# Three-set overlaps
+set1_set2_set3 <- Reduce(intersect, 
+                         list(up.results.list[[1]], 
+                              up.results.list[[2]], 
+                              up.results.list[[3]])) %>% setdiff(up.results.list[[4]])
+set1_set2_set4 <- Reduce(intersect, 
+                         list(up.results.list[[1]], 
+                              up.results.list[[2]], 
+                              up.results.list[[4]])) %>% setdiff(up.results.list[[3]])
+set1_set3_set4 <- Reduce(intersect, 
+                         list(up.results.list[[1]], 
+                              up.results.list[[3]], 
+                              up.results.list[[4]])) %>% setdiff(up.results.list[[2]])
+set2_set3_set4 <- Reduce(intersect, 
+                         list(up.results.list[[2]], 
+                              up.results.list[[3]], 
+                              up.results.list[[4]])) %>% setdiff(up.results.list[[1]])
+
+# All Sets
+all_four_sets <- Reduce(intersect, 
+                        list(up.results.list[[1]], 
+                             up.results.list[[2]], 
+                             up.results.list[[3]], 
+                             up.results.list[[4]]))
+
+# Organize the results in a data frame
+venn.data <- data.frame(
+  "Category" = c(paste0("Only in ", names(up.results.list)[1]), 
+                 paste0("Only in ", names(up.results.list)[2]), 
+                 paste0("Only in ", names(up.results.list)[3]), 
+                 paste0("Only in ", names(up.results.list)[4]),
+                 paste0(names(up.results.list)[1], 
+                        " and ", 
+                        names(up.results.list)[2]), 
+                 paste0(names(up.results.list)[1], 
+                        " and ", 
+                        names(up.results.list)[3]), 
+                 paste0(names(up.results.list)[1], 
+                        " and ", 
+                        names(up.results.list)[4]),
+                 paste0(names(up.results.list)[2], 
+                        " and ", 
+                        names(up.results.list)[3]), 
+                 paste0(names(up.results.list)[2], 
+                        " and ", 
+                        names(up.results.list)[4]), 
+                 paste0(names(up.results.list)[3], 
+                        " and ", 
+                        names(up.results.list)[4]), 
+                 paste(names(up.results.list)[1], 
+                       names(up.results.list)[2], 
+                       names(up.results.list)[3], 
+                       sep = ", "), 
+                 paste(names(up.results.list)[1], 
+                       names(up.results.list)[2], 
+                       names(up.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(up.results.list)[1], 
+                       names(up.results.list)[3], 
+                       names(up.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(up.results.list)[2], 
+                       names(up.results.list)[3], 
+                       names(up.results.list)[4], 
+                       sep = ", "),
+                 "All four contrasts"),
+  "Genes" = c(
+    paste(only_set1, collapse = ", "), paste(only_set2, collapse = ", "), 
+    paste(only_set3, collapse = ", "), paste(only_set4, collapse = ", "),
+    paste(set1_set2, collapse = ", "), paste(set1_set3, collapse = ", "),
+    paste(set1_set4, collapse = ", "), paste(set2_set3, collapse = ", "),
+    paste(set2_set4, collapse = ", "), paste(set3_set4, collapse = ", "),
+    paste(set1_set2_set3, collapse = ", "), paste(set1_set2_set4, collapse = ", "),
+    paste(set1_set3_set4, collapse = ", "), paste(set2_set3_set4, collapse = ", "),
+    paste(all_four_sets, collapse = ", ")
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+# Create a gt table
+venn_gt_table <- venn.data %>%
+  gt() %>%
+  tab_header(
+    title = "Up-regulated Gene Overlaps by Contrast",
+    subtitle = "Genes in Venn Diagram Intersections"
+  ) %>%
+  cols_label(
+    Category = "Venn Section",
+    Genes = "Gene Names"
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgreen")
+    ),
+    locations = cells_body(
+      rows = Genes != ""
+    )
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "lightcoral")
+    ),
+    locations = cells_body(
+      rows = Genes == "no DEGs"
+    )
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "grey")
+    ),
+    locations = cells_body(
+      rows = Genes == ""
+    )
+  )
+
+# Print the gt table
+venn_gt_table
+
+```
+
+#### Down-regulated Venn Diagram
+
+```{r Create venn diagram for down degs log FC 0.5}
+#| warning: false
+#| message: false
+
+
+venn.down.degs <- venn.diagram(down.results.list, 
+                            main = "Down-regulated DEGs each DE Contrast",
+                            category.names = c(names(down.results.list)[1],
+                                               names(down.results.list)[2], 
+                                               names(down.results.list)[3], 
+                                               names(down.results.list)[4]), 
+                            fill = c("maroon", 
+                                     "#E69F00", 
+                                     "#56B4E9", 
+                                     "#009E73"), 
+                            filename = NULL)
+
+
+grid.draw(venn.down.degs)
+
+
+```
+
+```{r Create table for down degs log FC 0.5}
+#| warning: false
+#| message: false
+
+# Create a table for genes in each category
+
+# Calculate the intersections and differences
+
+# Single Sets
+only_set1 <- setdiff(down.results.list[[1]], 
+                     union(down.results.list[[2]], 
+                           union(down.results.list[[3]], 
+                                 down.results.list[[4]])))
+only_set2 <- setdiff(down.results.list[[2]], 
+                     union(down.results.list[[1]], 
+                           union(down.results.list[[3]], 
+                                 down.results.list[[4]])))
+only_set3 <- setdiff(down.results.list[[3]], 
+                     union(down.results.list[[1]], 
+                           union(down.results.list[[2]], 
+                                 down.results.list[[4]])))
+only_set4 <- setdiff(down.results.list[[4]], 
+                     union(down.results.list[[1]], 
+                           union(down.results.list[[2]], 
+                                 down.results.list[[3]])))
+
+# Two Sets
+set1_set2 <- intersect(down.results.list[[1]], 
+                       down.results.list[[2]])
+set1_set3 <- intersect(down.results.list[[1]], 
+                       down.results.list[[3]])
+set1_set4 <- intersect(down.results.list[[1]], 
+                       down.results.list[[4]])
+set2_set3 <- intersect(down.results.list[[2]], 
+                       down.results.list[[3]])
+set2_set4 <- intersect(down.results.list[[2]], 
+                       down.results.list[[4]])
+set3_set4 <- intersect(down.results.list[[3]], 
+                       down.results.list[[4]])
+
+# Three Sets
+# Three-set overlaps
+set1_set2_set3 <- Reduce(intersect, 
+                         list(down.results.list[[1]], 
+                              down.results.list[[2]], 
+                              down.results.list[[3]])) %>% setdiff(down.results.list[[4]])
+set1_set2_set4 <- Reduce(intersect, 
+                         list(down.results.list[[1]], 
+                              down.results.list[[2]], 
+                              down.results.list[[4]])) %>% setdiff(down.results.list[[3]])
+set1_set3_set4 <- Reduce(intersect, 
+                         list(down.results.list[[1]], 
+                              down.results.list[[3]], 
+                              down.results.list[[4]])) %>% setdiff(down.results.list[[2]])
+set2_set3_set4 <- Reduce(intersect, 
+                         list(down.results.list[[2]], 
+                              down.results.list[[3]], 
+                              down.results.list[[4]])) %>% setdiff(down.results.list[[1]])
+
+# All Sets
+all_four_sets <- Reduce(intersect, 
+                        list(down.results.list[[1]], 
+                             down.results.list[[2]], 
+                             down.results.list[[3]], 
+                             down.results.list[[4]]))
+
+# Organize the results in a data frame
+venn.data <- data.frame(
+  "Category" = c(paste0("Only in ", names(down.results.list)[1]), 
+                 paste0("Only in ", names(down.results.list)[2]), 
+                 paste0("Only in ", names(down.results.list)[3]), 
+                 paste0("Only in ", names(down.results.list)[4]),
+                 paste0(names(down.results.list)[1], 
+                        " and ", 
+                        names(down.results.list)[2]), 
+                 paste0(names(down.results.list)[1], 
+                        " and ", 
+                        names(down.results.list)[3]), 
+                 paste0(names(down.results.list)[1], 
+                        " and ", 
+                        names(down.results.list)[4]),
+                 paste0(names(down.results.list)[2], 
+                        " and ", 
+                        names(down.results.list)[3]), 
+                 paste0(names(down.results.list)[2], 
+                        " and ", 
+                        names(down.results.list)[4]), 
+                 paste0(names(down.results.list)[3], 
+                        " and ", 
+                        names(down.results.list)[4]), 
+                 paste(names(down.results.list)[1], 
+                       names(down.results.list)[2], 
+                       names(down.results.list)[3], 
+                       sep = ", "), 
+                 paste(names(down.results.list)[1], 
+                       names(down.results.list)[2], 
+                       names(down.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(down.results.list)[1], 
+                       names(down.results.list)[3], 
+                       names(down.results.list)[4], 
+                       sep = ", "), 
+                 paste(names(down.results.list)[2], 
+                       names(down.results.list)[3], 
+                       names(down.results.list)[4], 
+                       sep = ", "),
+                 "All four contrasts"),
+  "Genes" = c(
+    paste(only_set1, collapse = ", "), paste(only_set2, collapse = ", "), 
+    paste(only_set3, collapse = ", "), paste(only_set4, collapse = ", "),
+    paste(set1_set2, collapse = ", "), paste(set1_set3, collapse = ", "),
+    paste(set1_set4, collapse = ", "), paste(set2_set3, collapse = ", "),
+    paste(set2_set4, collapse = ", "), paste(set3_set4, collapse = ", "),
+    paste(set1_set2_set3, collapse = ", "), paste(set1_set2_set4, collapse = ", "),
+    paste(set1_set3_set4, collapse = ", "), paste(set2_set3_set4, collapse = ", "),
+    paste(all_four_sets, collapse = ", ")
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+# Create a gt table
+venn_gt_table <- venn.data %>%
+  gt() %>%
+  tab_header(
+    title = "Down-regulated Gene Overlaps by Contrast",
+    subtitle = "Genes in Venn Diagram Intersections"
+  ) %>%
+  cols_label(
+    Category = "Venn Section",
+    Genes = "Gene Names"
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgreen")
+    ),
+    locations = cells_body(
+      rows = Genes != ""
+    )
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "lightcoral")
+    ),
+    locations = cells_body(
+      rows = Genes == "no DEGs"
+    )
+  ) %>% 
+  tab_style(
+    style = list(
+      cell_fill(color = "grey")
+    ),
+    locations = cells_body(
+      rows = Genes == ""
+    )
+  )
+
+# Print the gt table
+venn_gt_table
+
+
+```

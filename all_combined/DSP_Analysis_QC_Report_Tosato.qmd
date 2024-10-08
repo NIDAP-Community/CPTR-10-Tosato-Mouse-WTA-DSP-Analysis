@@ -1,0 +1,1378 @@
+---
+title: "DSP Analysis QC Report"
+format:
+  html:
+    code-fold: true
+editor: visual
+#css: "qc_report_style.css"
+
+params:
+  data.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/"
+  results.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/QC/"
+  run.folder: "8_16_24/"
+---
+
+## Load Libraries
+
+```{r Load Libraries}
+#| warning: false
+#| message: false
+
+# Load all relevant libraries
+
+library(DSPWorkflow)
+library(GeomxTools)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(ggforce)
+library(shadowtext)
+library(stringr)
+library(PCAtools)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(knitr)
+library(gt)
+library(tidyr)
+library(openxlsx)
+library(ComplexUpset)
+library(preprocessCore)
+
+source("DSP_QC_functions.R")
+```
+
+## Initialization
+
+```{r Initialization}
+
+# Input file parameters
+
+pkc.file.name <- "Mm_R_NGS_WTA_v1.0.pkc"
+pkc.file.path <- paste0(params$data.folder, pkc.file.name)
+
+annotation.file.name <- "annotation_tosato_CPTR8_2.xlsx"
+annotation.file.path <- paste0(params$data.folder, annotation.file.name)
+
+dcc.files <- list.files(file.path(paste0(params$data.folder, "dcc")),
+  pattern = ".dcc$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+# Annotation parameters
+annotation.sheet.name <- "All ROIs"
+sample.id.field.name <- "Sample_ID"
+roi.field.name <- "ROI"
+panel.field.name <- "panel"
+slide.field.name <- "slide name"
+class.field.name <- "class"
+region.field.name <- "region"
+segment.field.name <- "Segment"
+area.field.name <- "area"
+nuclei.field.name <- "nuclei"
+exclude.sankey <- TRUE
+segment.id.length <- 8
+
+# Create the GeoMxSet Object
+
+init.object <- initialize_object(dcc.files = dcc.files,
+                            pkc.files = pkc.file.path,
+                            annotation.file = annotation.file.path,
+                            annotation.sheet.name = annotation.sheet.name,
+                            sample.id.field.name = sample.id.field.name,
+                            roi.field.name = roi.field.name,
+                            panel.field.name = panel.field.name,
+                            slide.field.name = slide.field.name, 
+                            class.field.name = class.field.name, 
+                            region.field.name = region.field.name, 
+                            segment.field.name = segment.field.name,
+                            area.field.name = area.field.name,
+                            nuclei.field.name = nuclei.field.name, 
+                            segment.id.length = segment.id.length)
+
+```
+
+## Object Summary
+
+@fig-sankey shows a summary of AOIs per annotation
+
+```{r Object Summary, fig.width=12, fig.height=8}
+#| label: fig-sankey
+#| fig-cap: "Sankey Plot"
+#| warning: false
+
+#Rename the slide name column for formatting
+pData(init.object) <- pData(init.object) %>% 
+  mutate(slide = gsub("slide_", "", slide_name))
+
+# Define the lanes of the Sankey plot
+lane1 <- "slide"
+lane2 <- "class"
+lane3 <- "region"
+lane4 <- "segment"
+fill_lane <- "class"
+
+lanes <- c(lane1, lane2, lane3, lane4)
+
+
+#Establish variables for the Sankey plot
+x <- id <- y <- n <- NULL
+
+# select the annotations we want to show, use `` to surround column
+# names with spaces or special symbols
+
+# Create a count matrix
+count.mat <- count(pData(init.object), 
+                   !!as.name(lane1), 
+                   !!as.name(lane2), 
+                   !!as.name(lane3), 
+                   !!as.name(lane4))
+
+# Remove any rows with NA values
+na.per.column <- colSums(is.na(count.mat))
+na.total.count <- sum(na.per.column)
+                                             
+if(na.total.count > 0){
+  count.mat <- count.mat[!rowSums(is.na(count.mat)),]
+  rownames(count.mat) <- 1:nrow(count.mat)
+}
+
+
+# Gather the data and plot in order: lane 1, lane 2, ..., lane n
+# gather_set_data creates x, id, y, and n fields within sankey.count.data
+# Establish the levels of the Sankey
+sankey.count.data <- gather_set_data(count.mat, 1:4)
+
+# Define the annotations to use for the Sankey x axis labels
+sankey.count.data$x[sankey.count.data$x == 1] <- lane1
+sankey.count.data$x[sankey.count.data$x == 2] <- lane2
+sankey.count.data$x[sankey.count.data$x == 3] <- lane3
+sankey.count.data$x[sankey.count.data$x == 4] <- lane4
+
+sankey.count.data$x <-
+    factor(
+      sankey.count.data$x,
+      levels = c(as.name(lane1), 
+                 as.name(lane2), 
+                 as.name(lane3), 
+                 as.name(lane4)))
+    
+# For position of Sankey 100 segment scale
+adjust.scale.pos = -1.1
+
+# plot Sankey diagram
+sankey.plot <-
+  ggplot(sankey.count.data,
+         aes(
+           x,
+           id = id,
+           split = y,
+           value = n
+         )) +
+  geom_parallel_sets(aes(fill = !!as.name(fill_lane)), alpha = 0.5, axis.width = 0.1) +
+  geom_parallel_sets_axes(axis.width = 0.2, 
+                          fill = "seashell", 
+                          color = "seashell4") +
+  geom_parallel_sets_labels(color = "black",
+                            size = 3,
+                            angle = 0) + 
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "bottom",
+    axis.ticks.y = element_blank(),
+    axis.line = element_blank(),
+    axis.text.y = element_blank()
+  ) + 
+  scale_y_continuous(expand = expansion(0)) +
+  scale_x_discrete(expand = expansion(0)) +
+  labs(x = "", y = "") +
+  annotate(
+    geom = "segment",
+    x = (3.25 - adjust.scale.pos),
+    xend = (3.25 - adjust.scale.pos),
+    y = 20,
+    yend = 120,
+    lwd = 2
+  ) +
+  annotate(
+    geom = "text",
+    x = (3.19 - adjust.scale.pos),
+    y = 70,
+    angle = 90,
+    size = 5,
+    hjust = 0.5,
+    label = "100 AOIs"
+  )
+
+print(sankey.plot)
+```
+
+@fig-aoibarplot shows the total AOI counts per annotation
+
+```{r AOI Count Bar Plot, fig.width=12, fig.height=8}
+#| label: fig-aoibarplot
+#| fig-cap: "AOI Count Bar Plot"
+#| warning: false
+
+AOI.counts <- sankey.count.data
+
+AOI.counts$AOI_count <- as.numeric(AOI.counts$n)
+AOI.counts$type <- as.character(AOI.counts$x)
+AOI.counts$annotation <- AOI.counts$y
+
+AOI.annotation.sum <- data.frame(matrix(ncol = 2, nrow = 0))
+colnames(AOI.annotation.sum) <- c("annotation", "AOI_sum")
+
+# Create a data frame of AOI sums per annotation 
+for(anno in unique(AOI.counts$annotation)){
+  
+  # Filter for a specific annotation
+  anno.subset <- AOI.counts %>% 
+    filter(annotation == anno)
+  
+  # Add together the AOI counts
+  anno.sum.row <- data.frame(AOI_sum = sum(anno.subset$AOI_count), annotation = anno)
+  
+  # Append to the master AOI sum df
+  AOI.annotation.sum <- rbind(AOI.annotation.sum, anno.sum.row)
+  
+}
+
+AOI.counts.all <- merge(AOI.annotation.sum, AOI.counts, by = "annotation")
+
+AOI.counts.all  <-  AOI.counts.all %>% 
+  select(all_of(c("AOI_sum", "type", "annotation"))) %>% 
+  distinct()
+
+AOI.count.plot <- ggplot(AOI.counts.all, aes(x = annotation, y = AOI_sum)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~ type, ncol = 2, scales = "free_x") + 
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) + 
+  geom_text(aes(label = AOI_sum), vjust = -0.3, size = 3.5) +
+  labs(x = NULL, y = "AOI Count") + 
+  ylim(0, max(AOI.counts.all$AOI_sum) + 30)
+
+print(AOI.count.plot)
+
+```
+
+@fig-upsetr shows the size of annotation groups
+
+```{r UpsetR Plot, fig.width=12, fig.height=8}
+#| label: fig-upsetr
+#| fig-cap: "UpSetR Plot"
+#| warning: false
+
+# Vector of all values for upsetr plot
+all.lane.values <- c()
+
+# Gather all of the values for the upsetr plot
+for(lane in lanes){ 
+  
+  lane.values <- unique(pData(init.object)[[lane]])
+  
+  all.lane.values <- c(all.lane.values, lane.values)
+  
+}
+
+# Create the upset df with all FALSE values
+upset.df <- as.data.frame(matrix(FALSE, nrow = nrow(pData(init.object)), ncol = length(all.lane.values)))
+
+# Rename the columns to be all possible values for the upsetr plot
+colnames(upset.df) <- all.lane.values
+
+# Subset the annotation for only the relevant columns for upsetr
+anno.subset <- pData(init.object) %>% select(all_of(lanes))
+
+# For each row in the annotation data, if it contains the value of a column in the upsetr plot mark as TRUE
+for (i in 1:nrow(anno.subset)) {
+  row_values <- as.character(unlist(anno.subset[i, ]))
+  upset.df[i, row_values] <- TRUE
+}
+
+# Create the UpSetR Plot
+AOI.inter.count.plot <- upset(upset.df,  
+                              intersect = all.lane.values, 
+                              width_ratio = 0.4, 
+                              min_size = 4, 
+                              set_sizes=(upset_set_size() + 
+                                           geom_text(aes(label=..count..),
+                                                     hjust=1.1, stat='count') +
+                                           expand_limits(y=nrow(upset.df)) +
+                                           theme(axis.text.x=element_text(angle=90))))
+
+
+print(AOI.inter.count.plot)
+
+```
+
+## QC and Filtering
+
+```{r QC and Filtering}
+
+
+qc.output <-  qcProc(object = init.object,
+                        min.segment.reads = 1000, 
+                        percent.trimmed = 80,    
+                        percent.stitched = 80,   
+                        percent.aligned = 80,    
+                        percent.saturation = 50, 
+                        min.negative.count = 1.5,   
+                        max.ntc.count = 1000,     
+                        min.nuclei = 20,         
+                        min.area = 1000,
+                        print.plots = TRUE)
+    
+
+```
+
+Summary of QC for AOIs and Probes
+
+```{r QC Summary}
+
+qc.output$table
+
+```
+
+#### AOI QC
+
+AOI distribution by parameter and annotation
+
+```{r AOI Plots}
+
+# Print AOI plots
+qc.output$plot$trimmed
+qc.output$plot$aligned
+qc.output$plot$stitched
+qc.output$plot$saturated
+qc.output$plot$neg.plot
+
+
+```
+
+AOIs that have been flagged with the given QC parameters
+
+```{r AOI Flags}
+
+# Print AOI flags
+
+flag.column.detect <- sapply(qc.output$segment.flags, is.logical)
+flag.column.names <- names(qc.output$segment.flags[flag.column.detect])
+
+# A function for coloring TRUE flags as red
+red.flag <- function(x) {
+  x <- as.logical(x)
+  ifelse(x, "red", "white") 
+  }
+
+# Create the table using the flag coloring function
+if(nrow(qc.output$segment.flags) > 0){
+  qc.output$segment.flags %>% 
+  gt() %>% 
+  data_color(columns = flag.column.names, 
+                 fn = red.flag, 
+                 alpha = 0.7)
+}
+
+
+
+```
+
+### Probe QC
+
+Probes that have been flagged as either local or global outliers.
+
+```{r}
+
+# Create the table for probe flags
+probe.flags.df <- qc.output$probe.flags %>% separate_rows(LocalFlag, sep = ",")
+
+# Rename the dcc file name column
+probe.flags.df$Sample_ID <- probe.flags.df$LocalFlag
+
+# Grab the annotation for only the columns to map
+annotation <- pData(qc.output$object)
+annotation$Sample_ID <- rownames(annotation)
+
+annotation.subset <- annotation %>% 
+  select(Sample_ID, segmentID)
+
+# Map the AOI names in the flags to the segmentID
+probe.flags.df <- merge(probe.flags.df, annotation.subset, by = "Sample_ID")
+
+# Remove the dcc file name column 
+probe.flags.table <- probe.flags.df %>% 
+  select(TargetName, RTS_ID, segmentID, FlagType)
+
+# For a summary of only probe names
+probe.flag.summary <- qc.output$probe.flags %>% 
+  select(TargetName, RTS_ID, FlagType)
+
+
+# Toggle to include all flags or only summary
+include.all <- FALSE
+
+# For all flags including segment ID name
+if(include.all == TRUE){ 
+  
+  probe.flags.table %>% 
+  gt()
+  
+} else {
+  
+  probe.flag.summary %>% 
+  gt()
+  
+}
+
+
+```
+
+### Filtering
+
+```{r Filtering}
+
+object <- qc.output$object
+
+# Set up lists of segment IDs
+segment.list.total <- pData(object)$segmentID
+
+# Define Modules
+modules <- gsub(".pkc", "", pkc.file.name)
+
+# Calculate limit of quantification (LOQ) in each segment
+# LOQ = geomean(NegProbes) * geoSD(NegProbes)^(LOQ cutoff)
+# LOQ is calculated for each module (pkc file)
+loq <- data.frame(row.names = colnames(object))
+
+loq.min <- 2
+loq.cutoff <- 2
+
+for(module in modules) {
+  vars <- paste0(c("NegGeoMean_", "NegGeoSD_"),
+                 module)
+  if(all(vars[1:2] %in% colnames(pData(object)))) {
+    
+    neg.geo.mean <- vars[1]
+    neg.geo.sd <- vars[2]
+    
+    loq[, module] <-
+      pmax(loq.min,
+           pData(object)[, neg.geo.mean] * 
+             pData(object)[, neg.geo.sd] ^ loq.cutoff)
+  }
+}
+
+# Store the loq df in the annotation df
+pData(object)$loq <- loq
+
+# Setup a master loq matrix
+loq.mat <- c()
+
+
+for(module in modules) {
+  # Gather rows with the given module
+  ind <- fData(object)$Module == module
+  
+  # Check if each feature has counts above the LOQ
+  mat.i <- t(esApply(object[ind, ], MARGIN = 1,
+                     FUN = function(x) {
+                       x > loq[, module]
+                     }))
+  
+  # Store results in the master loq matrix
+  loq.mat <- rbind(loq.mat, mat.i)
+}
+
+# ensure ordering since this is stored outside of the geomxSet
+loq.mat <- loq.mat[fData(object)$TargetName, ]
+
+# Evaluate and Filter Segment Gene Detection Rate
+# Save detection rate information to pheno data
+pData(object)$GenesDetected <- colSums(loq.mat, na.rm = TRUE)
+pData(object)$GeneDetectionRate <- 100*(pData(object)$GenesDetected / nrow(object))
+
+# Establish detection bins
+detection.bins <- c("<1", "1-5", "5-10", "10-15", ">15")
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+pData(object)$DetectionThreshold <- 
+  cut(pData(object)$GeneDetectionRate,
+      breaks = c(0, 1, 5, 10, 15, 100),
+      labels = detection.bins)
+
+```
+
+#### Overall Gene Detection per AOI
+
+@fig-GeneDetectionbByAOI shows detection rate per AOI, colored by region.
+
+```{r Overall Gene Detection per AOI}
+#| label: fig-GeneDetectionbByAOI
+#| tbl-cap: "Overall Gene Detection per AOI"
+#| warning: false
+
+# stacked bar plot of different cut points (1%, 5%, 10%, 15%)
+segment.stacked.bar.plot <- ggplot(pData(object),
+                          aes(x = DetectionThreshold)) +
+  geom_bar(aes(fill = region)) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+  theme_bw() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(x = "Gene Detection Rate",
+         y = "Segments, #",
+         fill = "AOI Annotation")
+
+
+print(segment.stacked.bar.plot)
+```
+
+AOIs in the low detection bin of 1-5%
+
+```{r Low Detection AOI}
+
+# cut percent genes detected at 1, 5, 10, 15
+segment.table <- kable(table(pData(object)$DetectionThreshold, 
+                             pData(object)$class))
+
+# Make a list of segments with low detection
+low.detection.segments <- pData(object) %>% 
+  filter(GeneDetectionRate < 5) %>% 
+  select(any_of(c("segmentID", "GeneDetectionRate")))
+rownames(low.detection.segments) <- NULL
+
+# Print low detection segment table
+low.detection.segments %>% 
+  gt()
+
+```
+
+Gene detection for all AOIs
+
+```{r Gene Detection All AOIs}
+
+# Export a summary of the segment gene detection
+segment.detection.summary <- pData(object) %>% 
+  select(any_of(c("segmentID", "GeneDetectionRate", "DetectionThreshold")))
+
+```
+
+##### Filter out AOIs with low detection
+
+```{r Filter by AOI}
+
+# Filter the data using the cutoff for gene detection rate
+segment.gene.rate.cutoff <- 5
+
+object.segment.filtered <-
+    object[, pData(object)$GeneDetectionRate >= segment.gene.rate.cutoff]
+
+```
+
+#### Detection per Gene
+
+```{r Detection per Gene}
+
+# Evaluate and Filter Study-wide Gene Detection Rate 
+# Calculate detection rate:
+loq.mat <- loq.mat[, colnames(object.segment.filtered)]
+
+fData(object.segment.filtered)$DetectedSegments <- rowSums(loq.mat, na.rm = TRUE)
+fData(object.segment.filtered)$DetectionRate <-
+  100*(fData(object.segment.filtered)$DetectedSegments / nrow(pData(object)))
+
+# Establish detection bins
+detection.bins <- c("0", "<1", "1-5", "5-10", "10-20", "20-30", "30-40", "40-50", ">50")
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+fData(object.segment.filtered)$DetectionThreshold <- 
+  cut(fData(object.segment.filtered)$DetectionRate,
+      breaks = c(-1, 0, 1, 5, 10, 20, 30, 40, 50, 100),
+      labels = detection.bins)
+
+```
+
+@fig-DetectionPerGene shows the percent of all AOIs individual genes are detected within
+
+```{r Detection per Gene Plot}
+#| label: fig-DetectionPerGene
+#| fig-cap: "Gene Detection Percent of All AOIs"
+#| warning: false
+
+gene.stacked.bar.plot <- ggplot(fData(object.segment.filtered),
+                          aes(x = DetectionThreshold)) +
+  geom_bar(aes(fill = Module)) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+  theme_bw() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(x = "Gene Detection Rate",
+         y = "Genes, #",
+         fill = "Probe Set")
+
+print(gene.stacked.bar.plot)
+```
+
+Gene detection rates for specified genes of interest
+
+```{r Genes of Interest}
+#| label: tbl-GenesOfInterest
+#| tbl-cap: "Gene of Interest Detection Rate"
+#| warning: false
+
+# Gene of interest detection table
+goi <- c("A2M", "CD44")
+
+goi.table <- data.frame(Gene = goi,
+                        Number = fData(object.segment.filtered)[goi, "DetectedSegments"],
+                        DetectionRate = fData(object.segment.filtered)[goi, "DetectionRate"])
+
+
+# Print the GOI table
+goi.table %>% 
+  gt()
+```
+
+@fig-DetectionPerGeneLoss shows the loss of percentage of all AOIs individual genes are detected within
+
+```{r Gene Detection Rates Loss Plot}
+#| label: fig-DetectionPerGeneLoss
+#| fig-cap: "Gene Detection Percent of All AOIs"
+#| warning: false
+
+# Plot detection rate:
+plot.detect <- data.frame(Freq = c(1, 5, 10, 20, 30, 50))
+plot.detect$Number <-
+  unlist(lapply(c(1, 5, 10, 20, 30, 50),
+                function(x) {sum(fData(object.segment.filtered)$DetectionRate >= x)}))
+
+plot.detect$Rate <- plot.detect$Number / nrow(fData(object.segment.filtered))
+rownames(plot.detect) <- plot.detect$Freq
+
+genes.detected.plot <- ggplot(plot.detect, aes(x = as.factor(Freq), y = Rate, fill = Rate)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = formatC(Number, format = "d", big.mark = ",")),
+            vjust = 1.6, color = "black", size = 4) +
+  scale_fill_gradient2(low = "orange2", mid = "lightblue",
+                       high = "dodgerblue3", midpoint = 0.65,
+                       limits = c(0,1),
+                       labels = scales::percent) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = "% of Segments",
+       y = "Genes Detected, % of Panel > loq")
+
+print(genes.detected.plot)
+
+
+```
+
+Summary of all gene detection rates
+
+```{r Gene Detection Rate Summary}
+
+# Gather a summary of the every gene's detection percentage in all AOIs
+gene.detection.summary <- fData(object.segment.filtered) %>% 
+  mutate(gene = rownames(fData(object.segment.filtered))) %>% 
+  select(any_of(c("gene", "DetectionRate", "DetectionThreshold")))
+
+
+```
+
+##### Filter out genes with low detection
+
+```{r Filter Genes}
+
+# Set the cutoff for gene detection
+study.gene.rate.cutoff <- 5
+
+# Subset for genes above the study gene detection rate cutoff
+# Manually include the negative control probe, for downstream use
+negative.probe.fData <- subset(fData(object.segment.filtered), CodeClass == "Negative")
+neg.probes <- unique(negative.probe.fData$TargetName)
+object.gene.filtered <- object.segment.filtered[fData(object.segment.filtered)$DetectionRate >= study.gene.rate.cutoff |
+                   fData(object.segment.filtered)$TargetName %in% neg.probes, ]
+```
+
+**Write QC Output File**
+
+```{r Write QC output}
+
+# Start the QC output excel workbook
+qc.info.output <- createWorkbook()
+
+# Add the AOI flag info to the output file
+addWorksheet(qc.info.output, "AOI QC Flags")
+writeData(qc.info.output, sheet = "AOI QC Flags", qc.output$segment.flags)
+
+# Add the probe flag QC info to the output file
+addWorksheet(qc.info.output, "Probe QC Flags")
+writeData(qc.info.output, sheet = "Probe QC Flags", probe.flags.table)
+
+# Add the AOI detection QC info
+addWorksheet(qc.info.output, "AOI Detection Rate")
+writeData(qc.info.output, sheet = "AOI Detection Rate", segment.detection.summary)
+
+# Add the Gene detection QC info to the output file
+addWorksheet(qc.info.output, "Gene Detection Rate")
+writeData(qc.info.output, sheet = "Gene Detection Rate", gene.detection.summary)
+
+# Save the QC output file
+saveWorkbook(qc.info.output, paste0(params$results.folder, params$run.folder, "QC_info.xlsx"), overwrite = TRUE)
+```
+
+### Normalization
+
+```{r Normalization, warning=FALSE, message=FALSE}
+
+q3.normalization.output <- geomxNorm(
+                                  object = object.gene.filtered, 
+                                  norm = "q3")
+    
+    
+neg.normalization.output <- geomxNorm(
+                                  object = object.gene.filtered, 
+                                  norm = "neg")
+
+# Quantile normalization
+quantile.normalization.counts <- normalize.quantiles(object.gene.filtered@assayData$exprs)
+
+dimnames(quantile.normalization.counts) = dimnames(object.gene.filtered@assayData$exprs)
+    
+```
+
+#### Normalized Reads vs. Negative Background
+
+@fig-Q3vsBackground shows the quartile-3 (Q3) normalization counts compared to negative probes
+
+```{r Mulit-Plot for Q3 Normalization, fig.width=12, fig.height=8}
+#| label: fig-Q3vsBackground
+#| fig-cap: "Q3 Normalized Counts versus Background"
+#| warning: false
+
+q3.normalization.output$multi.plot
+
+
+```
+
+@fig-NegvsBackground shows the negative normalization counts compared to negative probes
+
+```{r Mulit-Plot for Neg Normalization, fig.width=12, fig.height=8}
+#| label: fig-NegvsBackground
+#| fig-cap: "Negative Normalized Counts versus Background"
+#| warning: false
+
+neg.normalization.output$multi.plot
+```
+
+**Example AOIs**
+
+@fig-RawReadBoxPlots shows the raw read count boxplots for an example 10 AOIs
+
+```{r Raw reads boxplots}
+#| label: fig-RawReadBoxPlots
+#| fig-cap: "Raw Counts for an Example 10 AOIs "
+#| warning: false
+
+q3.normalization.output$boxplot.raw
+```
+
+@fig-Q3NormBoxPlots shows the Q3 normalized read count boxplots for an example 10 AOIs
+
+```{r Q3 norm boxplots}
+#| label: fig-Q3NormBoxPlots
+#| fig-cap: "Q3 Normalized Counts for an Example 10 AOIs "
+#| warning: false
+
+q3.normalization.output$boxplot.norm
+```
+
+@fig-NegNormBoxPlots shows the negative normalized read count boxplots for an example 10 AOIs
+
+```{r Neg norm boxplots}
+#| label: fig-NegNormBoxPlots
+#| fig-cap: "Negative Normalized Counts for an Example 10 AOIs "
+#| warning: false
+
+neg.normalization.output$boxplot.norm
+```
+
+#### Signal to Noise
+
+```{r}
+
+# Gather the QC data, this will be identical for all normalizations
+pheno.data <- as.data.frame(q3.normalization.output$object@phenoData@data)
+pheno.data$sampleID <- rownames(pheno.data)
+
+# Find the LOQ column
+loq.field <- names(pheno.data)[grep("loq", colnames(pheno.data))]
+
+# Define and create the LOQ data frame
+loq.fields <- c("sampleID", loq.field)
+LOQ.data <-  pheno.data %>% select(all_of(loq.fields))
+
+# Gather the loq values (nested df) for each sample into a vector
+LOQ.values <- c()
+for(i in 1:nrow(LOQ.data)){
+  LOQ.values <- c(LOQ.values, unlist(lapply(LOQ.data$loq, function(x) x[[i]])))
+}
+
+# Add LOQ values back to the LOQ df
+LOQ.data$LOQ <- LOQ.values
+
+# A function for calculating signal to noise for each gene in each AOI
+signal_to_noise <- function(LOQ.data, 
+                            normalized.counts){
+  # Convert all counts to signal to noise ratio in a new df
+  signal.to.noise.df <- as.data.frame(normalized.counts) %>% 
+      mutate(across(everything(), ~ . / LOQ.data[rownames(LOQ.data) == cur_column(), "LOQ"]))
+  return(signal.to.noise.df)
+}
+
+# Calculate signal to noise for all normalization types
+q3.signal.to.noise <- signal_to_noise(LOQ.data = LOQ.data, 
+                                      normalized.counts = q3.normalization.output$object@assayData$q_norm)
+neg.signal.to.noise <- signal_to_noise(LOQ.data = LOQ.data, 
+                                      normalized.counts = neg.normalization.output$object@assayData$q_norm)
+quant.signal.to.noise <- signal_to_noise(LOQ.data = LOQ.data, 
+                                      normalized.counts = quantile.normalization.counts)
+
+
+# Create the cleaned annotation
+
+# Load the annotation (same for both normalization types)
+annotation <- pData(q3.normalization.output$object)
+
+# Remove NTCs
+cleaned.annotation.df <- as.data.frame(annotation[annotation$'slide_name' != "No Template Control", ])
+
+# Create a column for the nuclei bin
+cleaned.annotation.df$nuclei_bin <- cut(cleaned.annotation.df$nuclei,
+                     breaks = c(0, 10, 20, 50, Inf),
+                     labels = c("1-10", "11-20", "21-50", ">51"),
+                     right = TRUE) 
+
+# Remove .dcc from Sample ID row names
+cleaned.annotation.df <- cleaned.annotation.df %>% `rownames<-`(sub("\\.dcc", "", rownames(.)))
+
+cleaned.annotation.df$sampleID <- rownames(cleaned.annotation.df)
+
+signal.to.noise.boxplot <- function(signal.to.noise.df, 
+                                    annotation, 
+                                    group.field, 
+                                    facet.field = NULL){
+  
+  signal.to.noise.cleaned <- as.data.frame(t(signal.to.noise.df))
+  signal.to.noise.cleaned$sampleID <- gsub("\\.dcc", "", rownames(signal.to.noise.cleaned))
+  
+  gene.columns <- setdiff(colnames(signal.to.noise.cleaned), select.columns)
+  
+  # Create a column for the median value
+  signal.to.noise.cleaned <- signal.to.noise.cleaned %>%
+  rowwise() %>%
+  mutate(s2n_median = median(c_across(all_of(gene.columns)))) %>%
+  ungroup()
+  
+  # Gather columns from the annotation
+  if(is.null(facet.field)){
+    select.columns <- c("sampleID", group.field)
+  } else {
+    select.columns <- c("sampleID", group.field, facet.field)
+  }
+  
+  annotation.subset <- annotation %>% 
+    select(all_of(select.columns))
+  
+  s2n.annotation <- merge(signal.to.noise.cleaned, annotation, by = "sampleID")
+  
+  s2n.annotation.median <- s2n.annotation %>% 
+    select(all_of(c(select.columns, "s2n_median")))
+  
+  # convert all columns to character strings
+  s2n.annotation.median[] <- lapply(s2n.annotation.median, as.character)
+  
+  s2n.annotation.melt <- pivot_longer(s2n.annotation.median, 
+                                      cols = "s2n_median", 
+                                      names_to = "median", 
+                                      values_to = "signal_to_noise")
+  
+  median.select.columns <- c("Treatment group", "region", "s2n_median")
+  
+  s2n.annotation.median.subset <- s2n.annotation.median %>% 
+    select(all_of(median.select.columns))
+  
+  s2n.annotation.median.subset$s2n_median <- as.numeric(s2n.annotation.median.subset$s2n_median)
+  
+  s2n.median.boxplot <- ggplot(s2n.annotation.median.subset, aes(x = region, y = s2n_median, color = region)) +
+  geom_boxplot() +
+  facet_wrap(~ `Treatment group`) +
+  theme_minimal() +
+  labs(x = "Region", y = "Median Signal-to-Noise", color = "Region") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Create the boxplot
+  if(is.null(facet.field)) {
+    
+    s2n.barplot <- ggplot(s2n.annotation.median, aes_string(y = "s2n_median", 
+                                                 color = group.field)) +
+    geom_boxplot()
+    
+  } else {
+    
+    s2n.boxplot <- ggplot(s2n.annotation.melt, aes_string(y = "signal_to_noise", 
+                                                 color = group.field)) +
+    geom_boxplot() + 
+    facet_wrap(vars(.data[[facet.field]]))
+    
+  }
+  
+  
+  
+}
+```
+
+#### Principal Component Analysis (PCA)
+
+```{r PCA, warning=FALSE, message=FALSE}
+
+# See reference vignette: https://bioconductor.org/packages/release/bioc/vignettes/PCAtools/inst/doc/PCAtools.html#introduction
+
+# Load the Geomx objects
+object.q3 <- q3.normalization.output$object
+object.neg <- neg.normalization.output$object
+
+# Gather the the normalized counts
+q3.norm.counts.df <- as.data.frame(object.q3@assayData$q_norm)
+neg.norm.counts.df <- as.data.frame(object.neg@assayData$neg_norm)
+quant.norm.counts.df <- as.data.frame(quantile.normalization.counts)
+
+
+# Convert counts to log2
+q3.log.counts.df <- q3.norm.counts.df %>% 
+  mutate_all(~ log2(.)) %>% 
+  rename_all(~ gsub("\\.dcc", "", .))
+neg.log.counts.df <- neg.norm.counts.df %>% 
+  mutate_all(~ log2(.)) %>% 
+  rename_all(~ gsub("\\.dcc", "", .))
+quant.log.counts.df <- quant.norm.counts.df %>% 
+  mutate_all(~ log2(.)) %>% 
+  rename_all(~ gsub("\\.dcc", "", .))
+
+# Remove the negative controls from the log counts
+control.probes <- c("NegProbe-WTX")
+q3.log.counts.df <- q3.log.counts.df[!(rownames(q3.log.counts.df) %in% control.probes), ]
+neg.log.counts.df <- neg.log.counts.df[!(rownames(neg.log.counts.df) %in% control.probes), ]
+quant.log.counts.df <- quant.log.counts.df[!(rownames(quant.log.counts.df) %in% control.probes), ]
+
+# Load the annotation (same for both normalization types)
+annotation <- pData(object.q3)
+
+# Remove NTCs
+cleaned.annotation.df <- as.data.frame(annotation[annotation$'slide_name' != "No Template Control", ])
+
+# Create a column for the nuclei bin
+cleaned.annotation.df$nuclei_bin <- cut(cleaned.annotation.df$nuclei,
+                     breaks = c(0, 10, 20, 50, Inf),
+                     labels = c("1-10", "11-20", "21-50", ">51"),
+                     right = TRUE) 
+
+# Order of rownames of annotation need to match columns of count data
+cleaned.annotation.df <- cleaned.annotation.df[order(rownames(cleaned.annotation.df)), ]
+
+q3.log.counts.df <- q3.log.counts.df[order(colnames(q3.log.counts.df))]
+neg.log.counts.df <- neg.log.counts.df[order(colnames(neg.log.counts.df))]
+quant.log.counts.df <- quant.log.counts.df[order(colnames(quant.log.counts.df))]
+
+# Remove .dcc from Sample ID row names
+cleaned.annotation.df <- cleaned.annotation.df %>% `rownames<-`(sub("\\.dcc", "", rownames(.)))
+
+# Generate a PCA table for all samples for both normalization types
+q3.pca.table <- pca(q3.log.counts.df, 
+                 metadata = cleaned.annotation.df, 
+                 removeVar = 0.1)
+neg.pca.table <- pca(neg.log.counts.df, 
+                 metadata = cleaned.annotation.df, 
+                 removeVar = 0.1)
+quant.pca.table <- pca(quant.log.counts.df, 
+                 metadata = cleaned.annotation.df, 
+                 removeVar = 0.1)
+
+```
+
+#### PCA by Animal ID
+
+```{r PCA for Q3 segment, fig.width=12, fig.height=8}
+#| label: fig-PCAsegmentQ3
+#| fig-cap: "PCA colored by Animal_ID for Q3 Normalization"
+#| warning: false
+
+q3.pca.plot.segment <- biplot(q3.pca.table, 
+                         colby = "Animal_ID", 
+                         legendPosition = "right", 
+                         legendLabSize = 6, 
+                         legendIconSize = 3, 
+                         lab = NULL,
+                         title = "Q3 Normalization", 
+                         subtitle = "NTCs removed")
+
+print(q3.pca.plot.segment)
+
+```
+
+```{r PCA for Negative segment, fig.width=12, fig.height=8}
+#| label: fig-PCAsegmentNeg
+#| fig-cap: "PCA colored by Animal_ID for Negative Normalization"
+#| warning: false
+
+neg.pca.plot.segment <- biplot(neg.pca.table, 
+                         colby = "Animal_ID", 
+                         legendPosition = "right", 
+                         legendLabSize = 6, 
+                         legendIconSize = 3, 
+                         lab = NULL,
+                         title = "Negative Normalization", 
+                         subtitle = "NTCs removed")
+
+print(neg.pca.plot.segment)
+
+```
+
+```{r PCA for Quant segment, fig.width=12, fig.height=8}
+#| label: fig-PCAsegmentQuant
+#| fig-cap: "PCA colored by Segment for Quantile Normalization"
+#| warning: false
+
+quant.pca.plot.segment <- biplot(quant.pca.table, 
+                         colby = "Animal_ID", 
+                         legendPosition = "right", 
+                         legendLabSize = 6, 
+                         legendIconSize = 3, 
+                         lab = NULL,
+                         title = "Quantile Normalization", 
+                         subtitle = "NTCs removed")
+
+print(quant.pca.plot.segment)
+
+
+```
+
+#### PCA by Region
+
+```{r PCA for Q3 region, fig.width=12, fig.height=8}
+#| label: fig-PCAregionQ3
+#| fig-cap: "PCA colored by Region for Q3 Normalization"
+#| warning: false
+
+q3.pca.plot.region <- biplot(q3.pca.table, 
+                         colby = "region", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Q3 Normalization", 
+                         subtitle = "NTCs removed")
+
+
+print(q3.pca.plot.region)
+
+```
+
+```{r PCA for Neg region, fig.width=12, fig.height=8}
+#| label: fig-PCAregionNeg
+#| fig-cap: "PCA colored by Region for Negative Normalization"
+#| warning: false
+
+neg.pca.plot.region <- biplot(neg.pca.table, 
+                         colby = "region", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Negative Normalization", 
+                         subtitle = "NTCs removed")
+
+print(neg.pca.plot.region)
+
+```
+
+```{r PCA for Quant region, fig.width=12, fig.height=8}
+#| label: fig-PCAregionQuant
+#| fig-cap: "PCA colored by Region for Quantile Normalization"
+#| warning: false
+
+quant.pca.plot.region <- biplot(quant.pca.table, 
+                         colby = "region", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Quantile Normalization", 
+                         subtitle = "NTCs removed")
+
+print(quant.pca.plot.region)
+
+
+```
+
+#### PCA by Class
+
+```{r PCA for Q3 class, fig.width=12, fig.height=8}
+#| label: fig-PCAclassQ3
+#| fig-cap: "PCA colored by Class for Q3 Normalization"
+#| warning: false
+
+q3.pca.plot.class <- biplot(q3.pca.table, 
+                         colby = "class", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Q3 Normalization", 
+                         subtitle = "NTCs removed")
+
+print(q3.pca.plot.class)
+
+```
+
+```{r PCA for Negative class, fig.width=12, fig.height=8}
+#| label: fig-PCAclassNeg
+#| fig-cap: "PCA colored by Class for Negative Normalization"
+#| warning: false
+
+neg.pca.plot.class <- biplot(neg.pca.table, 
+                         colby = "class", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Negative Normalization", 
+                         subtitle = "NTCs removed")
+
+print(neg.pca.plot.class)
+
+```
+
+```{r PCA for Quantile class, fig.width=12, fig.height=8}
+#| label: fig-PCAclassQuant
+#| fig-cap: "PCA colored by Class for Quantile Normalization"
+#| warning: false
+
+quant.pca.plot.class <- biplot(quant.pca.table, 
+                         colby = "class", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Quantile Normalization", 
+                         subtitle = "NTCs removed")
+
+print(quant.pca.plot.class)
+
+
+```
+
+#### PCA by Slide
+
+```{r PCA for Q3 slide, fig.width=12, fig.height=8}
+#| label: fig-PCAslideQ3
+#| fig-cap: "PCA colored by Slide for Q3 Normalization"
+#| warning: false
+
+
+q3.pca.plot.slide <- biplot(q3.pca.table, 
+                         colby = "slide_name", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Q3 Normalization", 
+                         subtitle = "NTCs removed")
+
+print(q3.pca.plot.slide)
+
+```
+
+```{r PCA for Neg slide, fig.width=12, fig.height=8}
+#| label: fig-PCAslideNeg
+#| fig-cap: "PCA colored by Slide for Negative Normalization"
+#| warning: false
+
+neg.pca.plot.slide <- biplot(neg.pca.table, 
+                         colby = "slide_name", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Negative Normalization", 
+                         subtitle = "NTCs removed")
+
+print(neg.pca.plot.slide)
+
+```
+
+```{r PCA for Quant slide, fig.width=12, fig.height=8}
+#| label: fig-PCAslideQuant
+#| fig-cap: "PCA colored by Slide for Quantile Normalization"
+#| warning: false
+
+quant.pca.plot.slide <- biplot(quant.pca.table, 
+                         colby = "slide_name", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Quantile Normalization", 
+                         subtitle = "NTCs removed")
+
+print(quant.pca.plot.slide)
+
+
+```
+
+#### PCA by Nuclei Count
+
+```{r PCA for Q3 nuclei, fig.width=12, fig.height=8}
+#| label: fig-PCAnucleiQ3
+#| fig-cap: "PCA colored by Nuclei Count for Q3 Normalization"
+#| warning: false
+
+
+q3.pca.plot.nuclei <- biplot(q3.pca.table, 
+                         colby = "nuclei_bin", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Q3 Normalization", 
+                         subtitle = "NTCs removed")
+
+print(q3.pca.plot.nuclei)
+
+
+```
+
+```{r PCA for Negative nuclei, fig.width=12, fig.height=8}
+#| label: fig-PCAnucleiNeg
+#| fig-cap: "PCA colored by Nuclei Count for Negative Normalization"
+#| warning: false
+
+neg.pca.plot.nuclei <- biplot(neg.pca.table, 
+                         colby = "nuclei_bin", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Negative Normalization", 
+                         subtitle = "NTCs removed")
+
+print(neg.pca.plot.nuclei)
+```
+
+```{r PCA for Quant nuclei, fig.width=12, fig.height=8}
+#| label: fig-PCAnucleiQuant
+#| fig-cap: "PCA colored by Nuclei Count for Quantile Normalization"
+#| warning: false
+
+quant.pca.plot.nuclei <- biplot(quant.pca.table, 
+                         colby = "nuclei_bin", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = "Quantile Normalization", 
+                         subtitle = "NTCs removed")
+
+print(quant.pca.plot.nuclei)
+
+```
+
+### MA Plots
+
+```{r}
+# Set up pre and post normalization counts and convert to log
+
+pre.norm.counts <-
+  log(as.data.frame(q3.normalization.output$object@assayData$exprs), base = 2)
+
+post.q3norm.counts <- log(as.data.frame(q3.normalization.output$object@assayData$q_norm), base = 2)
+
+post.negnorm.counts <- log(as.data.frame(neg.normalization.output$object@assayData$neg_norm), base = 2)
+
+post.quantnorm.counts <- log(as.data.frame(quantile.normalization.counts), 
+                             base = 2)
+
+# Setup annotation groups for the ratio "M" (log A - log B)
+#tumor.types <- c("Biopsy")
+region.types <- c("tumor", "vessels")
+#source.types <- c("Skin")
+#segment.types <- c("full_ROI")
+
+# Define the name of the contrast
+contrast.name <- paste0(region.types[[1]], 
+                        "_", 
+                        region.types[[2]])
+
+# Set up the annotations and raw counts for the MA plots
+contrast.field <- "region"
+condition.label <- "tumor"
+reference.label <- "vessels"
+raw.log.counts <- pre.norm.counts
+annotation.MA <- annotation
+```
+
+#### Q3 Normalization
+
+```{r MA Plot Q3, message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# MA plots for two annotation groups to evaluate negative normalization
+log.counts <- post.q3norm.counts
+
+MA.plots.q3 <- make_MA(contrast.field = contrast.field, 
+                       condition.label = condition.label, 
+                       reference.label = reference.label, 
+                       log.counts = log.counts, 
+                       raw.log.counts = raw.log.counts, 
+                       annotation = annotation.MA)
+  
+  
+grid.draw(MA.plots.q3)
+```
+
+#### Negative Normalization
+
+```{r MA Plot Neg, message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+
+# MA plots for two annotation groups to evaluate negative normalization
+log.counts <- post.negnorm.counts
+
+MA.plots.neg <- make_MA(contrast.field = contrast.field, 
+                    condition.label = condition.label, 
+                    reference.label = reference.label, 
+                    log.counts = log.counts, 
+                    raw.log.counts = raw.log.counts, 
+                    annotation = annotation.MA)
+  
+  
+grid.draw(MA.plots.neg)
+```
+
+#### Quantile Normalization
+
+```{r MA Plot Quant, message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# MA plots for two annotation groups to evaluate quantile normalization
+log.counts <- post.quantnorm.counts
+
+MA.plots.quant <- make_MA(contrast.field = contrast.field, 
+                       condition.label = condition.label, 
+                       reference.label = reference.label, 
+                       log.counts = log.counts, 
+                       raw.log.counts = raw.log.counts, 
+                       annotation = annotation.MA)
+  
+  
+grid.draw(MA.plots.quant)
+
+```
