@@ -1,0 +1,594 @@
+---
+title: "DSP DE Analysis - Tosato"
+format:
+  html:
+    code-fold: true
+editor: visual
+
+params:
+  data.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/"
+  QC.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/QC/"
+  results.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/"
+  run.folder: "2_21_25/"
+  DSP.analysis.folder: "/Users/cauleyes/CPTR/DSP_Analysis/"
+---
+
+# DE Analysis - Vessel
+
+```{r Setup}
+#| warning: false
+#| message: false
+
+library(GeomxTools)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(stringr)
+library(PCAtools)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(DSPWorkflow)
+library(VennDiagram)
+library(gt)
+library(SpatialDecon)
+library(reshape2)
+library(ggpubr)
+library(plotly)
+library(tibble)
+library(tidyr)
+
+
+
+results.folder <- "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/"
+data.folder <- "/Users/cauleyes/CPTR/CPTR-10_Tosato/"
+QC.folder <- "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/QC/"
+run.folder <- "1_27_25/"
+DSP.analysis.folder <- "/Users/cauleyes/CPTR/DSP_Analysis/"
+
+# Source the helper functions
+source(paste0(DSP.analysis.folder, "DSP_functions.R"))
+
+# Set up the previous DE results for faster plot creation
+DE.results.folder <- paste0(results.folder, run.folder)
+DE.results.files <- list.files(DE.results.folder)
+```
+
+### Load the Normalized Counts and Annotation
+
+```{r Load Normalized Counts}
+
+normalized.object.list <- get(load(file = paste0(params$QC.folder,
+                                       "Tosato_q3_object_vessel.RDA")))
+
+```
+
+### Set Up
+
+```{r Set Up}
+
+# Set up annotation colors for the heatmaps
+anno.colors = list(
+      region = c(tumor = "pink",
+                 vessels = "steelblue1"), 
+      Treatment_group = c(C = "slateblue", 
+                T1 = "coral", 
+                T2 = "seagreen1", 
+                T3 = "cadetblue1", 
+                T4 = "pink")
+      )
+
+annotation.comparisons <- c(list(c("C", "T1")), 
+                            list(c("C", "T2")),
+                            list(c("C", "T3")),
+                            list(c("C", "T4")))
+
+melanoma.tme.combine.types <- list(
+  Natural_Killer_Cell = c("natural.killer.cell"), 
+  Macrophage_Monocyte_DC = c("macrophage.monocyte", 
+                             "conventional.dendritic.cell.1", 
+                             "conventional.dendritic.cell.2", 
+                             "migratory.dendritic.cell", 
+                             "plasmacytoid.dendritic.cell"), 
+  T_Cell = c("lymph.node.T.cell", 
+             "tumor.T.cell", 
+             "gamma.delta.T.cell.mucosal.invariant.T.cell"), 
+  B_Cell = c("B.cell"), 
+  Endothelial_Cell = c("tumour.endothelial.cell", 
+                       "lymphatic.endothelial.cell", 
+                       "lymph.node.endothelial.cell"), 
+  Fibroblast = c("cancer.associated.fibroblast.1", 
+                 "cancer.associated.fibroblast.2", 
+                 "cancer.associated.fibroblast.3", 
+                 "lymph.node.fibroblast")
+)
+
+```
+
+# **Cell Type Deconvolution**
+
+#### Functions
+
+```{r Deconvolution Functions}
+
+cell_deconvolution <- function(reference.matrix, 
+                               normalized.object, 
+                               neg.probe.names, 
+                               combine.cell.types.list = NULL, 
+                               anno.colors){
+  
+  # Extract the normalized read counts
+  object <- normalized.object
+  q3.normalized.reads <- object@assayData$q_norm
+  
+  # Extract the gene (feature) names
+  feature.data <- fData(object)
+  
+  # Derive the probe background
+  probe.background <- derive_GeoMx_background(norm = q3.normalized.reads,
+                                              probepool = feature.data$Module,
+                                              negnames = neg.probe.names)
+
+
+  # Run Spatial Decon
+  spatial.decon <- runspatialdecon(object = object,
+                      norm_elt = "q_norm",
+                      raw_elt = "exprs",
+                      X = reference.matrix,
+                      align_genes = TRUE, 
+                      cellmerges = combine.cell.types.list)
+
+  # Subset the annotation just for the heatmap annotations of interest
+  spatial.annotation <- pData(object) %>% 
+    select(c(names(anno.colors), segmentID))
+  
+  # Generate a mapping df for AOI IDs
+  spatial.annotation$sample_ID <- rownames(spatial.annotation)
+  ID.mapping <- spatial.annotation %>% 
+    select(sample_ID, segmentID)
+  
+  # Change the annotation row names
+  rownames(spatial.annotation) <- spatial.annotation$segmentID
+  spatial.annotation <- spatial.annotation %>% 
+    select(names(anno.colors))
+
+  # Gather the scores for each cell type with each ref set
+  cell.scores <- as.data.frame(spatial.decon$beta)
+  
+  # Add a column for mapping to AOI ID
+  cell.scores$sample_ID <- rownames(cell.scores)
+  
+  # Map the AOI ID
+  cell.scores <- merge(cell.scores, ID.mapping, by = "sample_ID")
+  
+  # Replace the rownames and remove extra ID columns
+  rownames(cell.scores) <- cell.scores$segmentID
+  cell.scores <- cell.scores %>% 
+    select(-segmentID, -sample_ID)
+  
+  # Transform for combining with annotation
+  cell.scores <- as.data.frame(t(cell.scores))
+  
+  # Check for cell types with all zeros and remove
+  row.sums <- rowSums(cell.scores)
+  zero.sum <- rownames(cell.scores[row.sums == 0, ])
+  cell.scores.cleaned <- cell.scores[!rownames(cell.scores) %in% zero.sum, ]
+  
+  # Calculate the abundance
+  cell.perc <- sweep(cell.scores.cleaned, 
+                     2, 
+                     colSums(cell.scores.cleaned), 
+                     FUN = "/") * 100
+
+  # Transform for combining with annotation
+  cell.perc.transform <- as.data.frame(t(cell.perc))
+  cell.perc.transform$segmentID <- rownames(cell.perc.transform)
+  
+  # Add column for mapping to annotation
+  spatial.annotation$segmentID <- rownames(spatial.annotation)
+
+  # Combine the cell type percentage and annotation and melt for use in ggplot
+  cell.combine <- merge(cell.perc.transform, spatial.annotation,
+                        by = "segmentID")
+  cell.melt <- melt(cell.combine, 
+                    id.vars = c("segmentID", 
+                                "region", 
+                                "Treatment_group"), 
+                    variable.name = "cell.type"
+                    )
+  
+  return(list("spatial.decon" = spatial.decon, 
+              "annotation" = spatial.annotation, 
+              "cell.scores" = cell.scores.cleaned, 
+              "cell.melt" = cell.melt, 
+              "normalized.reads" = q3.normalized.reads))
+  
+}
+  
+  
+
+boxplot_cell_type <- function(decon.data, 
+                              export.plots = FALSE, 
+                              ref.name, 
+                              annotation.comparisons, 
+                              annotation.field, 
+                              combined.plot = TRUE, 
+                              individual.plots = FALSE){
+  
+  output.plot.list <- list()
+  
+  if(combined.plot == TRUE){
+    
+    for(comparison in annotation.comparisons){
+      
+      comparison.decon.data <- decon.data %>% 
+        filter(.data[[annotation.field]] %in% comparison)
+      
+      max.value <- max(comparison.decon.data$value)
+      
+      comparison.list <- list(comparison)
+      
+      combined.plot <- ggplot(data = comparison.decon.data, 
+                              aes(x = !!sym(annotation.field), 
+                                                   y = value, 
+                                                   fill = !!sym(annotation.field))) + 
+        geom_boxplot(color = "black") + 
+        geom_jitter(width = 0.1, size = 1, alpha = 0.5, color = "black") + 
+        facet_wrap(~cell.type, scales = "free_x") + 
+        theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+              panel.grid.major.x = element_blank()) + 
+        labs(y = "Percentage of Total") + 
+        stat_compare_means(comparisons = comparison.list, 
+                           label = "p.signif", 
+                           label.y = max.value + (max.value*0.01))
+      
+      comparison.name <- paste(comparison, collapse = "_")
+      
+      output.plot.list[[comparison.name]] <- combined.plot
+      
+      if(export.plots == TRUE){
+        
+        ggsave(paste0(params$results.folder, 
+                "cell_type_deconvolution/", 
+                comparison.name, 
+                "_", 
+                ref.name, 
+                "_boxplots.png"), 
+         combined.plot, 
+         height = 16, 
+         width = 20)
+        
+      }
+      
+    }
+    
+    
+    
+  }
+  
+  #if(individual.plots == TRUE){
+  #  
+  #  cell.type.list <- unique(decon.data$cell.type)
+  #  
+  #  for(type in cell.type.list){
+  #
+  #    decon.data.type <- decon.data %>% 
+  #      filter(cell.type == type)
+  #    
+  #    max.value <- max(decon.data.type$value)
+        
+  #    decon.box.plot.dots <- ggplot(data = decon.data, aes(x = !!sym(annotaton.field)), 
+  #                                                         y = value, 
+  #                                                         fill = !!sym(annotaton.field)) + 
+  #      geom_boxplot(color = "black") + 
+  #      geom_jitter(width = 0.1, size = 1, alpha = 0.5, color = "black") +
+  #      theme(
+  #        axis.text.x = element_text(angle = 45, hjust = 1),
+  #        panel.grid.major.x = element_blank()) + 
+  #      labs(y = "Percentage of Total") + 
+  #      stat_compare_means(comparisons = annotation.comparisons[1], 
+  #                         label = "p.signif", 
+  #                         label.y = max.value + (max.value*0.1)) 
+  #    
+   #   decon.box.plot <- ggplot(data = decon.data.type, aes(x = region, 
+   #                                                y = value, 
+   #                                                fill = segment)) + 
+   #     geom_boxplot(color = "black") +
+   #     theme(
+   #       axis.text.x = element_text(angle = 45, hjust = 1),
+   #       panel.grid.major.x = element_blank()) + 
+   #     labs(y = "Percentage of Total") + 
+   #     stat_compare_means(comparisons = annotation.comparisons[1], 
+   #                        label = "p.signif", 
+   #                        label.y = max.value + 1) +
+   #     stat_compare_means(comparisons = annotation.comparisons[2], 
+   #                        label = "p.signif", 
+   #                        label.y = max.value + 5) +  
+   #     stat_compare_means(comparisons = annotation.comparisons[3], 
+   #                        label = "p.signif", 
+   #                        label.y = max.value + 3)
+    
+    #  cell.type.plot.list <- list()
+    #  
+    #  cell.type.plot.list[[paste0(type, "_no_dots")]] <- decon.box.plot
+    #  
+    #  cell.type.plot.list[[paste0(type, "_dots")]] <- decon.box.plot.dots
+    #  
+    #  output.plot.list <- c(output.plot.list, cell.type.plot.list)
+    
+   #   if(export.plots){
+   #   
+   #     ggsave(paste0(results.folder, 
+   #                 run.folder, 
+   #                 "spatial_decon/all_region_comparison/", 
+   #                 ref.name, 
+   #                 "_", 
+   #                 type, 
+   #                 "_boxplot.png"), 
+   #            decon.box.plot, 
+   #            height = 8, 
+   #            width = 12)
+   #     
+   #     ggsave(paste0(results.folder, 
+   #                 run.folder, 
+   #                 "spatial_decon/all_region_comparison/", 
+   #                 ref.name, 
+   #                 "_", 
+   #                 type, 
+   #                 "_boxplot_dots.png"), 
+   #            decon.box.plot.dots, 
+   #            height = 8, 
+   #            width = 12)
+   #     }
+
+    #}
+    
+  #}
+  
+  return(output.plot.list)
+}
+
+
+```
+
+#### Set up
+
+```{r Cell Type Deconvolution}
+#| warning: false
+#| message: false
+
+# Load the melanoma TME ref from Davidson 2020
+melanoma.tme.ref <- read.csv(paste0(params$data.folder, "deconvolution/melanoma_TME_cell_reference_Davidson2020.csv"))
+rownames(melanoma.tme.ref) <- melanoma.tme.ref$SYMBOL
+melanoma.tme.ref <- dplyr::select(melanoma.tme.ref, -SYMBOL)
+
+# Convert back to matrix
+melanoma.tme.ref <- as.matrix(melanoma.tme.ref)
+
+# Normalized read count object
+object <- normalized.object.list$object
+
+# Run spatial decon and generate all input data for plots
+spatial.decon.melanoma.tme <- cell_deconvolution(reference.matrix = melanoma.tme.ref, 
+                                                 normalized.object = object, 
+                                                 neg.probe.names = c("NegProbe-WTX"), 
+                                                 combine.cell.types.list = melanoma.tme.combine.types, 
+                                                 anno.colors = anno.colors)
+
+```
+
+#### Heatmap
+
+```{r Deconvolution Heatmap}
+#| warning: false
+#| message: false
+
+heatmap.annotation <- spatial.decon.melanoma.tme$annotation %>% 
+  select(-segmentID)
+
+melanoma.tme.heatmap <- make_heatmap(normalized.log.counts.df = spatial.decon.melanoma.tme$cell.scores,
+                         annotation.column = heatmap.annotation, 
+                         anno.colors = anno.colors, 
+                         cluster.rows = TRUE, 
+                         cluster.columns = FALSE, 
+                         main.title = "Spatial Decon Melanoma TME Reference", 
+                         show.rownames = TRUE)
+
+# Export Heatmaps
+export.decon.heatmaps <- FALSE
+if(export.decon.heatmaps == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                "cell_type_deconvolution/cell_type_heatmap_melanomaTME.png"), 
+         melanoma.tme.heatmap, 
+         height = 10, 
+         width = 14)
+  
+}
+
+```
+
+#### Proportion Bar Plots
+
+```{r Deconvolution Proportion Bar Plots}
+#| warning: false
+#| message: false
+
+melanoma.tme.bar.plot <- ggplot(data = spatial.decon.melanoma.tme$cell.melt, 
+                                aes(x = segmentID, 
+                                    y = value, 
+                                    fill = cell.type)) + 
+  ylab("Abundance") + 
+  geom_bar(stat = "identity", color = "black") + 
+  facet_wrap(~Treatment_group, scales = "free_x") + 
+  theme(
+    axis.text.x = element_blank(), 
+    panel.grid.major.x = element_blank(), 
+    axis.title.x = element_blank()
+  )
+  
+# Export Barplots
+export.decon.barplots <- FALSE
+if(export.decon.barplots == TRUE){
+
+  ggsave(paste0(results.folder, 
+                "cell_type_deconvolution/abundance_barplot_melanomaTME.png"), 
+         melanoma.tme.bar.plot, 
+         height = 10, 
+         width = 14)
+  
+}
+
+
+
+```
+
+#### Cell Type Boxplots
+
+##### Box Plot of all cell types
+
+```{r Box Plot All}
+
+C.T.plots.melanoma.tme <- boxplot_cell_type(decon.data = spatial.decon.melanoma.tme$cell.melt, 
+                               export.plots = TRUE, 
+                               ref.name = "melanoma_tme", 
+                               annotation.comparisons = annotation.comparisons, 
+                               annotation.field = "Treatment_group", 
+                               combined.plot = TRUE, 
+                               individual.plots = FALSE)
+
+
+# Export Boxplot
+export.decon.boxplots <- FALSE
+if(export.decon.boxplots == TRUE){
+
+  ggsave(paste0(results.folder, 
+                "cell_type_deconvolution/boxplot_all_cell_types_melanomaTME.png"), 
+         C.T.plots.melanoma.tme, 
+         height = 10, 
+         width = 14)
+  
+}
+
+```
+
+#### Reverse Deconvolution
+
+```{r Reverse Deconvolution}
+# Correct for an error with beta's formatting
+transposed.beta <- t(spatial.decon.melanoma.tme$spatial.decon$beta)
+
+reverse.deconvolution = reverseDecon(norm = spatial.decon.melanoma.tme$normalized.reads,
+                                     beta = transposed.beta)
+
+# Export the various components of reverse deconvolution
+export <- FALSE
+if(export){
+  write.csv(reverse.deconvolution$coefs, paste0(params$results.folder, "cell_type_deconvolution/reverse_decon_coef.csv"))
+}
+
+
+
+# Prepare data frame for plotting
+df.plot <- data.frame(
+  Gene = names(reverse.deconvolution$cors),
+  Correlation = reverse.deconvolution$cors,
+  ResidualSD = reverse.deconvolution$resid.sd
+)
+
+# Genes to highlight
+showgenes <- c("Cd11b", "Cd11c", "Ncr1", "Cd3", "Cd19", "Pdpn", "Col1a1", "Lyve1")
+
+# Create a column to differentiate highlighted genes
+df.plot$Highlight <- ifelse(df.plot$Gene %in% showgenes, "Highlighted", "Other")
+
+cor.sd.comparison.plot <- ggplot(df_plot, aes(x = Correlation, y = ResidualSD, label = Gene, color = Highlight)) + 
+  geom_point(alpha = 0.2) +
+  geom_text(aes(label = ifelse(Highlight == "Highlighted", as.character(Gene), "")), 
+            size = 5, hjust = 1.1, vjust = 1.1, color = "red") +
+  labs(title = "Correlation vs. Residual Standard Deviation",
+       x = "Correlation between Observed and Fitted Expression",
+       y = "Residual Standard Deviation") +
+  scale_color_manual(values = c("Other" = "black", "Highlighted" = "red")) +
+  theme(legend.position = "none")
+
+export <- FALSE
+if(export){
+  ggsave(paste0(params$results.folder, "cell_type_deconvolution/reverse_decon_cor_sd_comparison.png"), 
+       cor.sd.comparison.plot, 
+       height = 12, 
+       width = 12)
+}
+
+# Convert to interactive plotly plot
+interactive_plot <- ggplotly(cor.sd.comparison.plot, tooltip = "label")
+
+
+
+
+```
+
+#### Genes of Interest Box/Violin Plot
+
+```{r Boxolin plot}
+
+cell.type.markers <- c("Cd11b", 
+                        "Cd11c", 
+                        "Ncr1", 
+                        "Cd3", 
+                        "Cd19", 
+                        "Pdpn", 
+                        "Col1a1", 
+                        "Lyve1")
+
+normalized.counts <- normalized.object.list$object@assayData$q_norm
+
+annotation.df <- pData(normalized.object.list$object)
+
+# All Treatment Groups
+boxolin.plot <- gene_counts_violin_boxplot(counts = normalized.counts, 
+                                       annotation.df = annotation.df, 
+                                       gene.list = cell.type.markers, 
+                                       annotation.field = "Treatment_group", 
+                                       display.summary.stat = FALSE, 
+                                       compare.groups = FALSE)
+
+# For each Treatment Group
+comparison.plots <- list()
+for(comparison in annotation.comparisons){
+  
+  subset.annotation <- annotation.df %>% 
+    filter(Treatment_group %in% comparison)
+  
+  subset.counts <- normalized.counts[,colnames(normalized.counts) %in% rownames(subset.annotation)]
+  
+  comparison.boxolin.plot <- gene_counts_violin_boxplot(counts = subset.counts, 
+                                       annotation.df = subset.annotation, 
+                                       gene.list = cell.type.markers, 
+                                       annotation.field = "Treatment_group", 
+                                       display.summary.stat = FALSE, 
+                                       compare.groups = TRUE)
+  
+  comparison.name <- paste0(comparison[1], "_", comparison[2])
+  comparison.plots[[comparison.name]] <- comparison.boxolin.plot
+  
+  export <- TRUE
+  if(export){
+    
+    ggsave(paste0(params$results.folder, 
+                  "cell_type_deconvolution/", 
+                  comparison.name, 
+                  "_cell_type_marker_comparison.png"), 
+       comparison.boxolin.plot, 
+       height = 12, 
+       width = 12)
+    
+  }
+  
+}
+  
+  
+
+```

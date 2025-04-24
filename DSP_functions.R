@@ -2,6 +2,10 @@
 
 # Required libraries for functions
 library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(cowplot)
 
 subset_counts_for_lmm <- function(counts, 
                                    annotation, 
@@ -215,70 +219,6 @@ run_lmm <- function(object, contrast, within.slide){
   
 }
 
-
-make_volcano <- function(lmm.results, 
-                         title, 
-                         legend.title, 
-                         x.axis.title, 
-                         fc.limit = 1, 
-                         pos.label.limit = 1, 
-                         neg.label.limit = -1){ 
-  
-  ## Make a volcano plot for the comparison
-  
-  # Define the columns for the volcano plot data
-  #logfc.column.name <- paste0("logFC_", comparison)
-  #padj.column.name <- paste0("adj.pval", comparison)
-  
-  #results$logfc <- results[[logfc.column.name]]
-  #results$padj <- results[[padj.column.name]]
-  
-  # Create a column for direction of DEGs
-  lmm.results$de_direction <- "NONE"
-  lmm.results$de_direction[lmm.results$padj < 0.05 & 
-                             lmm.results$logfc > fc.limit] <- "UP"
-  lmm.results$de_direction[lmm.results$padj < 0.05 & 
-                             lmm.results$logfc < -fc.limit] <- "DOWN"
-  
-  # Create a label for DEGs based on label limits
-  lmm.results$deglabel <- ifelse((lmm.results$logfc > pos.label.limit | 
-                                   lmm.results$logfc < neg.label.limit) & 
-                                   lmm.results$padj < 0.05, 
-                                 lmm.results$gene,
-                                 NA
-                                 )
-  
-  # Compute the scale for the volcano x-axis
-  log2.scale <- max(abs(lmm.results$logfc))
-  
-  # Establish the color scheme for the volcano plot
-  contrast.level.colors <- c("steelblue4", "grey", "violetred4")
-  names(contrast.level.colors) <- c("DOWN", "NONE", "UP")
-  
-  # Make the volcano plot
-  volcano.plot <- ggplot(data = lmm.results, aes(x = logfc, 
-                                                 y = -log10(padj), 
-                                                 col = de_direction, 
-                                                 label = deglabel)) +
-    geom_vline(xintercept = c(-fc.limit, fc.limit), col = "gray", linetype = 'dashed') +
-    geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
-    xlim(-7.5, 7.5) + 
-    labs(x = x.axis.title,
-         y = "-log10 adjusted p-value", 
-         title = title) + 
-    geom_point(size = 2) +
-    scale_color_manual(legend.title, 
-                       values = contrast.level.colors) + 
-    geom_text_repel(max.overlaps = Inf) + 
-    xlim(-log2.scale-1, log2.scale+1) + 
-    theme(plot.title = element_text(hjust = 0.5))
-  
-  return(list("volcano.plot" = volcano.plot))
-  
-}
-
-region.types <- c("tumor", "vessel")
-
 # Set up the MA plot table
 make_MA <- function(contrast.field, 
                     condition.label, 
@@ -378,22 +318,37 @@ run_GSEA <- function(){
   
 }
 
-make_heatmap <- function(normalized.log.counts.df, 
-                         de.results, 
-                         top.degs, 
+make_heatmap <- function(normalized.log.counts.df = q3.norm.log.counts, 
+                         de.results = NULL, 
+                         top.degs = FALSE, 
+                         top.variable = FALSE, 
                          logfc.column = NULL, 
                          logfc.cutoff = NULL, 
                          annotation.column, 
                          annotation.row = NULL, 
                          anno.colors, 
-                         cluster.rows = FALSE, 
-                         cluster.columns = FALSE, 
+                         cluster.rows = TRUE, 
+                         cluster.columns = TRUE, 
                          main.title, 
                          row.gaps = NULL, 
                          column.gaps = NULL, 
                          show.rownames = FALSE, 
-                         show.colnames = FALSE){
+                         show.colnames = FALSE, 
+                         min.genes.to.display = 2, 
+                         max.genes.to.display = 500, 
+                         font.size.row = 4){
   
+  
+  
+  if(top.degs == TRUE & top.variable == TRUE){ 
+  
+    stop("Set only one of top.degs or top.variable to TRUE, not both")  
+    
+  }
+  
+  #if (top.variable == TRUE){
+    
+  #}
   
   # Filter genes by top DEGs, if applicable
   if(top.degs == TRUE){ 
@@ -410,11 +365,20 @@ make_heatmap <- function(normalized.log.counts.df,
       
       degs.df <- degs.df %>% 
         filter(.data[[logfc.column]] > logfc.cutoff | .data[[logfc.column]] < -(logfc.cutoff))
-      
     }
     
-    # Revert to only p-value correction if no DEGs with logFC cutoff
-    if(length(rownames(degs.df)) < 2){
+    # Use DEGs meeting adj p-val and logfc cutoffs
+    if(length(rownames(degs.df)) >= min.genes.to.display){
+      
+      # Set up main title with logfc cutoff
+      main.title <- paste0(main.title, " [logfc (+-", logfc.cutoff, ")")
+      
+      main.title <- paste0(main.title, " adj p-val (<0.05)]")
+      
+    }    
+    
+    # Revert to adj p-val cutoff and no logfc cutoff
+    if(length(rownames(degs.df)) < min.genes.to.display){
       
       degs.df <- de.results %>% 
         filter(padj < 0.05) %>% 
@@ -422,11 +386,48 @@ make_heatmap <- function(normalized.log.counts.df,
       
       print("Not enough DEGs with listed logFC cutoff, reverting to all DEGs with adj p-value < 0.05")
       
+      # Set up main title with logfc cutoff
+      main.title <- paste0(main.title, " [no logfc cutoff")
+      
+      main.title <- paste0(main.title, " adj p-val (<0.05)]")
+      
+    }
+    
+    # Revert to nonadj p-val cutoff and logfc cutoff
+    if(length(rownames(degs.df)) < min.genes.to.display){
+      
+      degs.df <- de.results %>% 
+        filter(pval < 0.05) %>% 
+        arrange(desc(padj)) %>% 
+        filter(.data[[logfc.column]] > logfc.cutoff | .data[[logfc.column]] < -(logfc.cutoff))
+      
+      print("Not enough DEGs with adj p-val < 0.05, reverting to all DEGs with p-value < 0.05")
+      
+      main.title <- paste0(main.title, " [logfc (+-", logfc.cutoff, ")")
+      
+      main.title <- paste0(main.title, " p-val (<0.05, no adj)]")
+      
+    }
+    
+    # Revert to only p-val if no DEGs with p-val cutoff and logfc cutoff
+    if(length(rownames(degs.df)) < min.genes.to.display){
+      
+      degs.df <- de.results %>% 
+        filter(pval < 0.05) %>% 
+        arrange(desc(pval))
+      
+      print("Not enough DEGs with adj p-val < 0.05, reverting to NON-adjusted p-value < 0.05")
+      
+      # Set up main title with logfc cutoff
+      main.title <- paste0(main.title, " [no logfc cutoff ")
+      
+      main.title <- paste0(main.title, " p-val (<0.05, no adj)]")
+      
     }
     
     # If there are more then 500 DEGs, trim down to top 500
-    if(length(rownames(degs.df)) > 500){
-      degs.df <- degs.df %>% slice(1:500)
+    if(length(rownames(degs.df)) > max.genes.to.display){
+      degs.df <- degs.df %>% slice(1:max.genes.to.display)
     }
     
     # Grab the list of DEGs
@@ -439,6 +440,26 @@ make_heatmap <- function(normalized.log.counts.df,
   } else {
     
     counts <- normalized.log.counts.df
+    
+  }
+  
+  # Arrange by annotations if no column clustering
+  if(cluster.columns == FALSE){
+    
+    # First arrange the annotation by the annotation groups
+    anno.col.names <- colnames(annotation.column)
+    
+    for(col in anno.col.names){
+      
+      #annotation.column[[col]] <- as.factor(annotation.column[[col]])
+      
+      annotation.column <- annotation.column %>% 
+        arrange(.data[[col]])
+      
+    }
+    
+    # Next match the counts file to the row order of the annotation
+    counts <- counts[, rownames(annotation.column), drop = FALSE]
     
   }
   
@@ -459,7 +480,8 @@ make_heatmap <- function(normalized.log.counts.df,
                            annotation_colors = anno.colors, 
                            gaps_row = row.gaps, 
                            gaps_col = column.gaps, 
-                           fontsize_row = 4)
+                           fontsize_row = font.size.row)
+  
   
   
   return(heatmap.plot)
@@ -473,181 +495,290 @@ calculate_signal2noise <- function(){
 }
 
 
-normalize_counts <- function(object, norm.type, facet.annotation) {
+normalize_counts <- function() {}
+
+gsea_preranked_list <- function(contrast.field, 
+                                contrast.levels, 
+                                annotation, 
+                                log.counts){
   
-  if(class(object)[1] != "NanoStringGeoMxSet"){
-    stop(paste0("Error: You have the wrong data class, must be NanoStringGeoMxSet" ))
-  }
+  # Gather the signal to noise ratio for GSEA ranking
+  # Default method for ranking genes from GSEA manual:
+  # https://www.gsea-msigdb.org/gsea/doc/GSEAUserGuideTEXT.htm#_Metrics_for_Ranking
   
-  # run reductions
-  color.variable <- Value <- Statistic <- NegProbe <- Q3 <- Annotation <- NULL
+  # Contrast level A is the "condition" (positive when calculating fold change)
+  contrast.A.annotation <- annotation %>% 
+    filter(!!sym(contrast.field) == contrast.levels[1])
   
-  # Start Function
-  neg.probes<- "NegProbe-WTX"
-  ann.of.interest <- facet.annotation
+  contrast.A.sampleIDs <- rownames(contrast.A.annotation)
   
-  stat.data <- base::data.frame(row.names = colnames(exprs(object)),
-                                AOI = colnames(exprs(object)),
-                                Annotation = Biobase::pData(object)[, ann.of.interest],
-                                Q3 = unlist(apply(exprs(object), 2,
-                                                  quantile, 0.75, na.rm = TRUE)),
-                                NegProbe = exprs(object)[neg.probes, ])
+  contrast.A.counts <- as.data.frame(log.counts) %>% 
+    select(all_of(contrast.A.sampleIDs))
   
-  stat.data.m <- melt(stat.data, measures.vars = c("Q3", "NegProbe"),
-                      variable.name = "Statistic", value.name = "Value")
+  contrast.A.counts$gene <- rownames(contrast.A.counts)
   
-  stat.data.mean <- stat.data.m %>% 
-    mutate(group = paste0(Annotation, Statistic)) %>% 
-    group_by(group) %>% 
-    mutate(group_mean = mean(Value)) %>% 
-    ungroup() %>% 
-    select(Annotation, Statistic, group_mean) %>% 
-    distinct()
+  # Contrast level B is the "reference" (negative when calculating fold change)
   
-  distribution.plot <- ggplot(stat.data.m, aes(x=Value, 
-                                               color=Statistic, 
-                                               fill=Statistic)) + 
-    geom_density(alpha=0.6) +
-    geom_vline(data=stat.data.mean, aes(xintercept=group_mean, color=Statistic),
-               linetype="dashed") +
-    scale_color_manual(values = c("#56B4E9", "#E69F00")) +
-    scale_fill_manual(values=c("#56B4E9", "#E69F00")) + 
-    scale_x_continuous(limits = c(0, max(stat.data.m$Value) + 10), 
-                       expand = expansion(mult = c(0, 0))) +  
-    facet_wrap(~Annotation, nrow = 1) + 
-    labs(title=" Distribution per AOI of All Probes vs Negative", 
-         x="Probe Counts per AOI", 
-         y = "Density from AOI Count", 
-         color = "Statistic", 
-         fill = "Statistic") +
-    theme_bw()
+  contrast.B.annotation <- annotation %>% 
+    filter(!!sym(contrast.field) == contrast.levels[2])
   
-  #scale_x_continuous(trans = "log2") + 
-  #scale_y_continuous(trans = "log2") +
+  contrast.B.sampleIDs <- rownames(contrast.B.annotation)
   
-  q3.neg.plot <- ggplot(stat.data,
-                 aes(x = NegProbe, y = Q3, color = Annotation)) +
-    geom_abline(alpha = 0.5, intercept = 0, slope = 1, lty = "dashed", color = "darkgray") +
-    geom_point(alpha = 0.5) + 
-    geom_smooth(method = "loess", 
-                se = FALSE, 
-                linetype = "dashed", 
-                alpha = 0.5) + 
-    theme_bw() + 
-    theme(aspect.ratio = 1) +
-    labs(title = "Q3 versus Negative Mean", 
-         x = "Negative Probe GeoMean per AOI", 
-         y = "Q3 of all Probes per AOI ") +
-    scale_x_continuous(trans = "log2") +
-    scale_y_continuous(trans = "log2")
+  contrast.B.counts <- as.data.frame(log.counts) %>% 
+    select(all_of(contrast.B.sampleIDs))
   
-  plt3 <- ggplot(stat.data,
-                 aes(x = NegProbe, y = Q3 / NegProbe, color = Annotation)) +
-    geom_hline(yintercept = 1, lty = "dashed", color = "darkgray") +
-    geom_point() + theme_bw() +
-    scale_x_continuous(trans = "log2") + 
-    scale_y_continuous(trans = "log2") +
-    theme(aspect.ratio = 1) +
-    labs(x = "Negative Probe GeoMean, Counts", y = "Q3/NegProbe Value, Counts")
+  contrast.B.counts$gene <- rownames(contrast.B.counts)
   
-  btm.row <- plot_grid(plt2, plt3, nrow = 1, labels = c("B", ""),
-                       rel_widths = c(0.43,0.57))
-  multi.plot <- plot_grid(plt1, btm.row, ncol = 1, labels = c("A", ""))
+  # Add a column to each contrast level for the mean and standard deviation
+  contrast.A.counts <- contrast.A.counts %>% 
+    mutate(mean.A = rowMeans(select_if(., is.numeric))) %>%  
+    mutate(stdev.A = apply(select_if(., is.numeric), 1, sd))
   
-  if(norm == "q3"){
-    # Q3 norm (75th percentile) for WTA/CTA  with or without custom spike-ins
-    object <- normalize(object,
-                        norm_method = "quant", 
-                        desiredQuantile = .75,
-                        toElt = "q_norm")
-    
-    # The raw counts boxplot
-    transform1.raw<- exprs(object[,1:10])
-    transform2.raw<- as.data.frame(transform1.raw)
-    transform3.raw<- melt(transform2.raw)
-    ggboxplot.raw <- ggplot(transform3.raw, aes(variable, value)) +
-      stat_boxplot(geom = "errorbar") +
-      geom_boxplot(fill="#2CA02C") +
-      scale_y_log10() +
-      xlab("Segment") + 
-      ylab("Counts, Raw") +
-      ggtitle("Q3 Norm Counts") +
-      scale_x_discrete(labels=c(1:10))
-    
-    # The normalized counts boxplot
-    transform1.norm<- assayDataElement(object[,1:10], elt = "q_norm")
-    transform2.norm<- as.data.frame(transform1.norm)
-    transform3.norm<- melt(transform2.norm)
-    ggboxplot.norm <- ggplot(transform3.norm, aes(variable, value)) +
-      stat_boxplot(geom = "errorbar") +
-      geom_boxplot(fill="#2CA02C") +
-      scale_y_log10() +
-      xlab("Segment") + 
-      ylab("Counts, Q3 Normalized") +
-      ggtitle("Quant Norm Counts") +
-      scale_x_discrete(labels=c(1:10))
-  }
-  if(norm == "Q3"){
-    stop(paste0("Error: Q3 needs to be q3" ))
-  }
-  if(norm == "quantile"){
-    stop(paste0("Error: quantile needs to be q3" ))
-  }
-  if(norm == "Quantile"){
-    stop(paste0("Error: Quantile needs to be q3" ))
-  }
-  if(norm == "quant"){
-    stop(paste0("Error: quant needs to be q3" ))
-  }
+  contrast.B.counts <- contrast.B.counts %>% 
+    mutate(mean.B = rowMeans(select_if(., is.numeric))) %>%  
+    mutate(stdev.B = apply(select_if(., is.numeric), 1, sd))
   
-  if(norm == "neg"){
-    # Background normalization for WTA/CTA without custom spike-in
-    object <- normalize(object,
-                        norm_method = "neg", 
-                        fromElt = "exprs",
-                        toElt = "neg_norm")
-    
-    # The raw counts boxplot
-    transform1.raw<- exprs(object[,1:10])
-    transform2.raw<- as.data.frame(transform1.raw)
-    transform3.raw<- melt(transform2.raw)
-    ggboxplot.raw <- ggplot(transform3.raw, aes(variable, value)) +
-      stat_boxplot(geom = "errorbar") +
-      geom_boxplot(fill="#FF7F0E") +
-      scale_y_log10() +
-      xlab("Segment") + 
-      ylab("Counts, Raw") +
-      ggtitle("Neg Norm Counts") +
-      scale_x_discrete(labels=c(1:10))
-    
-    # The normalized counts boxplot
-    transform1.norm<- assayDataElement(object[,1:10], elt = "neg_norm")
-    transform2.norm<- as.data.frame(transform1.norm)
-    transform3.norm<- melt(transform2.norm)
-    ggboxplot.norm <- ggplot(transform3.norm, aes(variable, value)) +
-      stat_boxplot(geom = "errorbar") +
-      geom_boxplot(fill="#FF7F0E") +
-      scale_y_log10() +
-      xlab("Segment") + 
-      ylab("Counts, Neg. Normalized") +
-      ggtitle("Neg Norm Counts") +
-      scale_x_discrete(labels=c(1:10))
-  }
-  if(norm == "Neg"){
-    stop(paste0("Error: Neg needs to be neg" ))
-  }
-  if(norm == "negative"){
-    stop(paste0("Error: negative needs to be neg" ))
-  }
-  if(norm == "Negative"){
-    stop(paste0("Error: Negative needs to be neg" ))
-  }
+  GSEA.preanked.df <- merge(contrast.A.counts, contrast.B.counts, by = "gene")
   
-  return(list("multi.plot" = multi.plot, "boxplot.raw" = ggboxplot.raw, "boxplot.norm" = ggboxplot.norm, "object" = object))
+  GSEA.preanked.df <- GSEA.preanked.df %>% 
+    mutate(signal2noise = (mean.A - mean.B)/(stdev.A + stdev.B)) %>% 
+    arrange(desc(signal2noise)) %>% 
+    select(c(gene, mean.A, mean.B, stdev.A, stdev.B, signal2noise))
+  
+  return(GSEA.preanked.df)
+  
 }
 
-run_lme4_lmm <- function(){
+make_volcano <- function(lmm.results, 
+                         title, 
+                         legend.title, 
+                         x.axis.title, 
+                         fc.limit = 1, 
+                         pos.label.limit = 1, 
+                         neg.label.limit = -1, 
+                         custom.gene.labels = NULL){ 
+  
+  ## Make a volcano plot for the comparison
+  
+  # Create a column for direction of DEGs
+  lmm.results$de_direction <- "NONE"
+  lmm.results$de_direction[lmm.results$padj < 0.05 & 
+                             lmm.results$logfc > fc.limit] <- "UP"
+  lmm.results$de_direction[lmm.results$padj < 0.05 & 
+                             lmm.results$logfc < -fc.limit] <- "DOWN"
+  
+  # Create a label for DEGs based on label limits
+  lmm.results$deglabel <- ifelse((lmm.results$logfc > pos.label.limit | 
+                                    lmm.results$logfc < neg.label.limit) & 
+                                   lmm.results$padj < 0.05, 
+                                 lmm.results$gene,
+                                 NA
+  )
+  
+  # Create a label for DEGs
+  if(is.null(custom.gene.labels)){
+    
+    lmm.results$deglabel <- ifelse(lmm.results$de_direction == "NONE", 
+                                   NA, 
+                                   lmm.results$gene)
+    
+  } else {
+    
+    lmm.results$deglabel <- ifelse(lmm.results$gene %in% custom.gene.labels, 
+                                   lmm.results$gene, 
+                                   NA)
+    
+  }
+  
+  # Compute the scale for the volcano x-axis
+  log2.scale <- max(abs(lmm.results$logfc))
+  
+  # Establish the color scheme for the volcano plot
+  contrast.level.colors <- c("steelblue4", "grey", "violetred4")
+  names(contrast.level.colors) <- c("DOWN", "NONE", "UP")
+  
+  # Make the volcano plot based on custom gene labels
+  if(is.null(custom.gene.labels)){
+    
+    contrast.level.colors <- c("steelblue4", "grey", "violetred4")
+    names(contrast.level.colors) <- c("DOWN", "NONE", "UP")
+    
+    volcano.plot <- ggplot(data = lmm.results, aes(x = logfc, 
+                                                   y = -log10(padj), 
+                                                   col = de_direction, 
+                                                   label = deglabel)) +
+      geom_vline(xintercept = c(-fc.limit, fc.limit), col = "gray", linetype = 'dashed') +
+      geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+      labs(x = x.axis.title,
+           y = "-log10 adjusted p-value", 
+           title = title) + 
+      geom_point(size = 2) +
+      scale_color_manual(legend.title, 
+                         values = contrast.level.colors) + 
+      geom_text_repel(max.overlaps = Inf) + 
+      xlim(-log2.scale-1, log2.scale+1) + 
+      theme(plot.title = element_text(hjust = 0.5))
+    
+  } else {
+    
+    # Label the custom genes depending on significance
+    lmm.results <- lmm.results %>% 
+      mutate(custom.label = ifelse(!is.na(deglabel) & de_direction == "NONE", 
+                                   "BLACK", 
+                                   ifelse(!is.na(deglabel) & de_direction != "NONE", 
+                                          de_direction, 
+                                          "NONE")))
+    
+    contrast.level.colors <- c("steelblue4", "grey", "violetred4", "black")
+    names(contrast.level.colors) <- c("DOWN", "NONE", "UP", "BLACK")
+    
+    lmm.results.labeled <- lmm.results %>%
+      filter(custom.label != "NONE")
+    
+    lmm.results.unlabeled <- lmm.results %>% 
+      filter(custom.label == "NONE")
+    
+    
+    volcano.plot <- ggplot() + 
+      geom_point(data = lmm.results.unlabeled, aes(x = logfc, 
+                                                   y = -log10(padj), 
+                                                   col = custom.label, 
+                                                   alpha = 0.5)) + 
+      geom_point(data = lmm.results.labeled, aes(x = logfc, 
+                                                 y = -log10(padj), 
+                                                 col = custom.label, 
+                                                 alpha = 1)) +
+      geom_vline(xintercept = c(-fc.limit, fc.limit), col = "gray", linetype = 'dashed') +
+      geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+      labs(x = x.axis.title,
+           y = "-log10 adjusted p-value", 
+           title = title) + 
+      geom_point(size = 2) +
+      scale_color_manual(legend.title, 
+                         values = contrast.level.colors, 
+                         breaks = c("DOWN", "UP")) + 
+      geom_text_repel(data = lmm.results.labeled,
+                      aes(x = logfc, 
+                          y = -log10(padj), 
+                          label = deglabel, 
+                          col = custom.label), 
+                      max.overlaps = Inf, 
+                      size = 6, 
+                      show.legend = FALSE) + 
+      xlim(-log2.scale-1, log2.scale+1) + 
+      theme(plot.title = element_text(hjust = 0.5)) + 
+      scale_alpha_identity(guide = "none")
+    
+  }
+  
+  return(list("volcano.plot" = volcano.plot))
+  
+}
 
+make_dual_volcano <- function(lmm.results.1, 
+                              lmm.results.2,
+                              lmm.results.1.label,
+                              lmm.results.2.label, 
+                              title, 
+                              legend.title, 
+                              x.axis.title, 
+                              fc.limit = 1, 
+                              pos.label.limit = 1, 
+                              neg.label.limit = -1, 
+                              custom.gene.labels = NULL){
+  
+  # A combined list of the two results
+  lmm.results.list <- list()
+  lmm.results.list[[lmm.results.1.label]] <- lmm.results.1
+  lmm.results.list[[lmm.results.2.label]] <- lmm.results.2
+  
+  # Create a column for direction of DEGs
+  for(lmm.results.label in names(lmm.results.list)){
+    
+    lmm.results <- lmm.results.list[[lmm.results.label]]
+    
+    lmm.results$de_direction <- "NONE"
+    lmm.results$de_direction[lmm.results$padj < 0.05 & 
+                               lmm.results$logfc > fc.limit] <- "UP"
+    lmm.results$de_direction[lmm.results$padj < 0.05 & 
+                               lmm.results$logfc < -fc.limit] <- "DOWN"
+    
+    #lmm.results$de_direction <- factor(lmm.results$de_direction, 
+    #                                   levels = "UP", "NONE", "DOWN")
+    
+    # Create a label for DEGs based on label limits
+    lmm.results$deglabel <- ifelse((lmm.results$logfc > pos.label.limit | 
+                                      lmm.results$logfc < neg.label.limit) & 
+                                     lmm.results$padj < 0.05, 
+                                   lmm.results$gene,
+                                   NA)
+    
+    # Convert to -log10 p-value
+    lmm.results$neg.log10.pval <- -log10(lmm.results$padj)
+    
+    # Add an analysis label 
+    lmm.results$analysis.label <- lmm.results.label
+    
+    lmm.results.list[[lmm.results.label]] <- lmm.results
+    
+  }
+  
+  # Convert -log10 p-value to neg for mirrored second analysis
+  lmm.results.list[[lmm.results.2.label]]$neg.log10.pval <- -(lmm.results.list[[lmm.results.2.label]]$neg.log10.pval)
+  
+  # Combine the two analyses into a master df
+  lmm.results.combine <- bind_rows(lmm.results.list[[lmm.results.1.label]], 
+                                   lmm.results.list[[lmm.results.2.label]])
+  
+  # Establish the limits and breaks for x and y axes
+  log2.scale <- ceiling(max(abs(lmm.results$logfc)))
+  pval.scale <- ceiling(max(abs(lmm.results.combine$neg.log10.pval)))
+
+  y.axis.breaks <- seq(-pval.scale, pval.scale, by = 1)
+  
+  # Establish the color scheme for the volcano plot
+  contrast.level.colors <- c("violetred4", "grey", "steelblue4")
+  names(contrast.level.colors) <- c("UP", "NONE", "DOWN")
   
   
+  
+  # Make the plot
+  dual.volcano.plot <- ggplot(data = lmm.results.combine, 
+                              aes(x = logfc, 
+                                  y = neg.log10.pval, 
+                                  col = de_direction, 
+                                  label = deglabel)) +
+    geom_vline(xintercept = c(-fc.limit, fc.limit), 
+               col = "darkgray", 
+               linetype = 'dashed') + 
+    geom_vline(xintercept = 0, 
+               col = "black") + 
+    geom_hline(yintercept = c(-log10(0.05), -(-log10(0.05))), 
+               col = "darkgray", 
+               linetype = 'dashed') + 
+    geom_hline(yintercept = 0, 
+               col = "black") + 
+    xlim(-log2.scale - 1, log2.scale + 1) + 
+    scale_y_continuous(
+      limits = c(-pval.scale, pval.scale),
+      breaks = y.axis.breaks,
+      labels = abs(y.axis.breaks)) + 
+    labs(x = x.axis.title,
+         y = "-log10 adjusted p-value", 
+         title = title) + 
+    geom_point(size = 2, alpha = 0.7) +
+    scale_color_manual(legend.title, 
+                       values = contrast.level.colors) + 
+    geom_text_repel(max.overlaps = Inf, show.legend = FALSE) + 
+    theme(plot.title = element_text(hjust = 0.5), 
+          ) + 
+    theme_linedraw()
+  
+  #dual.volcano.labeled <- ggdraw() +
+  #  draw_plot(dual.volcano.plot, x = 0.02, width = 0.95) +  # Move the plot slightly right
+  #  draw_text(lmm.results.1.label, x = 0.01, y = 0.6, angle = 90, size = 14, hjust = 0) +
+  #  draw_text(lmm.results.2.label, x = 0.01, y = 0.2, angle = 90, size = 14, hjust = 0)
+  
+  return(dual.volcano.plot)
+
 }

@@ -1,0 +1,176 @@
+---
+title: "tSNE for DEGS in Vessel"
+format: html
+editor: visual
+
+params:
+  de.data.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/DE/1_27_25/"
+  counts.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/QC/"
+  results.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/QC/"
+  run.folder: "2_11_25/"
+---
+
+## Load Libraries
+
+```{r}
+
+library(Rtsne)
+library(tsne)
+library(dplyr)
+library(tibble)
+library(stringr)
+
+
+```
+
+## Load DEG lists
+
+```{r}
+
+# Load the normalized counts
+normalized.counts <- read.csv(paste0(params$counts.folder,
+                                     "Tosato_q3_counts_vessel_renamed.csv"))
+
+# Load the de results csv files
+results.files <- list.files(file.path(params$de.data.folder),
+  pattern = ".csv$",
+  full.names = FALSE,
+  recursive = TRUE
+)
+
+# A vector for storing all DE gene names by contrast
+degs.contrast.list <- c()
+
+# A vector for all unique DE gene names
+all.degs <- c()
+
+# Add each comparison's results DE Genes
+for(file in results.files){
+  
+  # Gather the DE results 
+  de.results <- read.csv(paste0(params$de.data.folder, file))
+  
+  # Define the comparison info
+  comparison.name <- sub("_de.*", "", file) 
+  adjpval.col <- paste0(comparison.name, "_adjpval")
+  
+  # Filter for DEGs
+  de.filtered <- de.results %>% 
+    filter(.data[[adjpval.col]] < 0.05)
+                     
+  # Add to master list per comparison
+  degs.contrast.list[[comparison.name]] <- de.filtered$Gene
+  
+  # Add to whole master list
+  all.degs <- c(all.degs, de.filtered$Gene)
+  
+}
+
+# Grab all the unique DEGs
+all.unique.degs <- unique(all.degs)
+
+# Filter the counts for all unique DEGs and make rownames as genes
+filtered.counts <- normalized.counts %>% 
+  filter(X %in% all.unique.degs) %>% 
+  column_to_rownames(var = "X")
+
+tsne.input.counts <- t(filtered.counts)
+
+tsne.output <- Rtsne(tsne.input.counts)
+
+tsne.output.alt <- tsne(tsne.input.counts)
+
+plot(tsne.output$Y)
+
+plot(tsne.output.alt)
+
+# Get all of the annotation IDs
+annotation.IDs <- as.data.frame(str_split_fixed(rownames(tsne.input.counts), 
+                                  pattern = "\\.", 
+                                  n = 6))
+
+# Rename the columns
+colnames(annotation.IDs) <- c("treatment.group", 
+                              "region", 
+                              "segment", 
+                              "slide", 
+                              "ROI", 
+                              "animal.id")
+
+# Gather the annotations of interest
+animal.IDs <- annotation.IDs$animal.id
+treatment.groups <- annotation.IDs$treatment.group
+
+# Create tSNE for Treatment Groups
+colors = rainbow(length(unique(treatment.groups)))
+names(colors) = unique(treatment.groups)
+ecb.treatment = function(x,y){ plot(x,t='n'); text(x,labels=treatment.groups, col=colors[treatment.groups]) }
+
+tsne.results.per5 = tsne(tsne.input.counts, perplexity=5)
+tsne.results.per25 = tsne(tsne.input.counts, perplexity=25)
+tsne.results.per50 = tsne(tsne.input.counts, perplexity=50)
+tsne.results.per100 = tsne(tsne.input.counts, perplexity=100)
+
+# Set up the data frame for ggplot
+tsne.treatment.group.df <- as.data.frame(tsne.results.per50)
+tsne.treatment.group.df$treatment.group <- treatment.groups
+
+# Plot the tSNE results
+tsne.plot.treatment.group <- ggplot(tsne.treatment.group.df, aes(x = V1, 
+                                                                 y = V2, 
+                                                                 color = treatment.group)) + 
+  geom_point()
+
+ggsave(paste0(params$results.folder, "tsne_treatment_group_perplexity50.png"), 
+       tsne.plot.treatment.group, 
+       height = 10, 
+       width = 12)
+
+
+# Create tSNE for animal_IDs
+#colors = rainbow(length(unique(animal.IDs)))
+#names(colors) = unique(animal.IDs)
+#ecb.animalID = function(x,y){ plot(x,t='n'); text(x,labels=animal.IDs, col=colors[animal.IDs]) }
+
+#tsne.alt.animalIDs = tsne(tsne.input.counts, epoch_callback = ecb.animalID, perplexity=50)
+
+# Set up the data frame for ggplot
+tsne.animal.ID.df <- as.data.frame(tsne.results.per100)
+tsne.animal.ID.df$animal.ID <- animal.IDs
+
+# Plot the tSNE results
+tsne.plot.animal.ID <- ggplot(tsne.animal.ID.df, aes(x = V1, 
+                                                     y = V2, 
+                                                     color = animal.ID)) + 
+  geom_point() + 
+  theme(legend.position = "none")
+
+
+ggsave(paste0(params$results.folder, "tsne_animal_id_perplexity100.png"), 
+       tsne.plot.animal.ID, 
+       height = 10, 
+       width = 12)
+
+
+tsne.alt.combined.df <- as.data.frame(tsne.results.per100)
+tsne.alt.combined.df$treatment.group <- treatment.groups
+tsne.alt.combined.df$animal.ID <- animal.IDs
+
+
+tsne.combined <- ggplot(tsne.alt.combined.df, aes(x = V1, 
+                                                  y = V2, 
+                                                  color = animal.ID, 
+                                                  shape = treatment.group)) + 
+  geom_point(size = 3) + 
+  guides(color = "none") + 
+  theme()
+
+
+ggsave(paste0(params$results.folder, "tsne_combined_perplexity100.png"), 
+       tsne.combined, 
+       height = 10, 
+       width = 12)
+
+
+
+```

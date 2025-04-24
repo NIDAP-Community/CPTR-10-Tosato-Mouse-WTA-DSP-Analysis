@@ -1,5 +1,5 @@
 ---
-title: "DSP Analysis QC Report"
+title: "DSP Analysis QC Report: CPTR-10 Tosato Vessel Only"
 format:
   html:
     code-fold: true
@@ -7,9 +7,9 @@ editor: visual
 #css: "qc_report_style.css"
 
 params:
-  data.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/"
-  results.folder: "/Users/cauleyes/CPTR/CPTR-8_2_Tosato/tumor_vessel_split/vessel/QC/"
-  run.folder: "8_26_24/"
+  data.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/"
+  results.folder: "/Users/cauleyes/CPTR/CPTR-10_Tosato/tumor_vessel_split/vessel/QC/"
+  run.folder: "1_27_25/"
 ---
 
 ## Load Libraries
@@ -84,7 +84,6 @@ annotation.sheet.name <- "All ROIs"
 sample.id.field.name <- "Sample_ID"
 roi.field.name <- "roi"
 panel.field.name <- "panel"
-slide.field.name <- "slide name"
 class.field.name <- "class"
 region.field.name <- "region"
 segment.field.name <- "Segment"
@@ -102,7 +101,6 @@ init.object <- initialize_object(dcc.files = dcc.files.subset,
                             sample.id.field.name = sample.id.field.name,
                             roi.field.name = roi.field.name,
                             panel.field.name = panel.field.name,
-                            slide.field.name = slide.field.name, 
                             class.field.name = class.field.name, 
                             region.field.name = region.field.name, 
                             segment.field.name = segment.field.name,
@@ -346,7 +344,7 @@ qc.output <-  qcProc(object = init.object,
                         percent.saturation = 50, 
                         min.negative.count = 1,   
                         max.ntc.count = 1000,     
-                        min.nuclei = 10,         
+                        min.nuclei = 3,         
                         min.area = 1000,
                         print.plots = TRUE)
     
@@ -733,27 +731,37 @@ object.gene.filtered <- object.segment.filtered[fData(object.segment.filtered)$D
 
 ```{r Write QC output, include=FALSE}
 
-# Start the QC output excel workbook
-qc.info.output <- createWorkbook()
+write.qc.file <- FALSE
 
-# Add the AOI flag info to the output file
-addWorksheet(qc.info.output, "AOI QC Flags")
-writeData(qc.info.output, sheet = "AOI QC Flags", qc.output$segment.flags)
+if(write.qc.file == TRUE){
+  
+  # Start the QC output excel workbook
+  qc.info.output <- createWorkbook()
+  
+  # Add the AOI flag info to the output file
+  addWorksheet(qc.info.output, "AOI QC Flags")
+  writeData(qc.info.output, sheet = "AOI QC Flags", qc.output$segment.flags)
+  
+  # Add the probe flag QC info to the output file
+  addWorksheet(qc.info.output, "Probe QC Flags")
+  writeData(qc.info.output, sheet = "Probe QC Flags", probe.flags.table)
+  
+  # Add the AOI detection QC info
+  addWorksheet(qc.info.output, "AOI Detection Rate")
+  writeData(qc.info.output, sheet = "AOI Detection Rate", segment.detection.summary)
+  
+  # Add the Gene detection QC info to the output file
+  addWorksheet(qc.info.output, "Gene Detection Rate")
+  writeData(qc.info.output, sheet = "Gene Detection Rate", gene.detection.summary)
+  
+  # Save the QC output file
+  saveWorkbook(qc.info.output, paste0(params$results.folder, 
+                                      params$run.folder, 
+                                      "QC_info.xlsx"), overwrite = TRUE)
+  
+}
 
-# Add the probe flag QC info to the output file
-addWorksheet(qc.info.output, "Probe QC Flags")
-writeData(qc.info.output, sheet = "Probe QC Flags", probe.flags.table)
 
-# Add the AOI detection QC info
-addWorksheet(qc.info.output, "AOI Detection Rate")
-writeData(qc.info.output, sheet = "AOI Detection Rate", segment.detection.summary)
-
-# Add the Gene detection QC info to the output file
-addWorksheet(qc.info.output, "Gene Detection Rate")
-writeData(qc.info.output, sheet = "Gene Detection Rate", gene.detection.summary)
-
-# Save the QC output file
-saveWorkbook(qc.info.output, paste0(params$results.folder, params$run.folder, "QC_info.xlsx"), overwrite = TRUE)
 ```
 
 ### Normalization
@@ -775,6 +783,39 @@ quantile.normalization.counts <- normalize.quantiles(object.gene.filtered@assayD
 dimnames(quantile.normalization.counts) = dimnames(object.gene.filtered@assayData$exprs)
 
 
+# Add new column names for the exported counts file
+
+# Gather the annotation
+annotation <- pData(q3.normalization.output$object)
+
+# Fix the charcaters in the Animal ID column
+annotation$Animal_ID <- sub("-", "_", annotation$Animal_ID)
+annotation$Animal_ID <- sub("\\(", "_", annotation$Animal_ID)
+annotation$Animal_ID <- sub("\\)", "", annotation$Animal_ID)
+
+# Create a mapping for the custom counts
+mapping.df.custom <- data.frame(sample_ID = rownames(annotation), 
+                         AOI_ID = paste0(annotation$segmentID, 
+                                              "|", 
+                                              annotation$Animal_ID))
+
+# Gather the counts for the custom ID
+q3.counts.custom <- q3.normalization.output$object@assayData$q_norm
+
+# Rename the columns in the counts df to the custom ID
+colnames(q3.counts.custom)[match(mapping.df.custom$sample_ID, colnames(q3.counts.custom))] <- mapping.df.custom$AOI_ID
+
+# Create a mapping for the segment ID counts
+mapping.df.segmentID <- data.frame(sample_ID = rownames(annotation), 
+                         segmentID = annotation$segmentID)
+
+# Gather the counts for the segment ID
+q3.counts.segmentID <- q3.normalization.output$object@assayData$q_norm
+
+# Rename the columns in the counts df to the custom ID
+colnames(q3.counts.segmentID)[match(mapping.df.segmentID$sample_ID, colnames(q3.counts.segmentID))] <- mapping.df.segmentID$segmentID
+
+
 
 # Export normalized counts and annotation
 export.counts <- FALSE
@@ -794,6 +835,27 @@ if(export.counts == TRUE){
          file = paste0(params$results.folder,
                        "Tosato_q3_object_vessel.RDA"))
     
+    # Write the counts with custom column name
+    write.csv(q3.counts.custom, 
+              file = paste0(params$results.folder,
+                            "Tosato_q3_counts_vessel_renamed.csv"))
+ 
+    # Write the counts with original dcc column name
+    write.csv(q3.normalization.output$object@assayData$q_norm, 
+              file = paste0(params$results.folder,
+                            "Tosato_q3_counts_vessel.csv"))
+    
+    # Save RDS of counts and annotation for Shiny
+    counts.df <- as.data.frame(q3.normalization.output$object@assayData$q_norm)
+    annotation.df <- as.data.frame(pData(q3.normalization.output$object))
+    
+    saveRDS(counts.df, 
+            file = paste0(params$results.folder,
+                            "Tosato_q3_counts_vessel.RDS"))
+    saveRDS(annotation.df, 
+            file = paste0(params$results.folder,
+                            "Tosato_filtered_annotation_vessel.RDS"))
+       
   }
 
   
@@ -1075,12 +1137,12 @@ quant.pca.table <- pca(quant.log.counts.df,
 
 #### PCA by Animal ID
 
-```{r PCA for Q3 segment, fig.width=12, fig.height=8}
-#| label: fig-PCAsegmentQ3
+```{r PCA for Q3 Animal ID, fig.width=12, fig.height=8}
+#| label: fig-PCAanimalIDQ3
 #| fig-cap: "PCA colored by Animal_ID for Q3 Normalization"
 #| warning: false
 
-q3.pca.plot.segment <- biplot(q3.pca.table, 
+q3.pca.plot.animalID <- biplot(q3.pca.table, 
                          colby = "Animal_ID", 
                          legendPosition = "right", 
                          legendLabSize = 6, 
@@ -1089,27 +1151,40 @@ q3.pca.plot.segment <- biplot(q3.pca.table,
                          title = "Q3 Normalization", 
                          subtitle = "NTCs removed")
 
-print(q3.pca.plot.segment)
+ggplotly(q3.pca.plot.animalID)
 
-q3.pca.plot.segment <- biplot(q3.pca.table, 
-                         colby = "segmentID", 
-                         legendPosition = "right", 
-                         legendLabSize = 6, 
-                         legendIconSize = 3, 
-                         lab = NULL,
-                         title = "Q3 Normalization", 
-                         subtitle = "NTCs removed")
+print(q3.pca.plot.animalID)
 
-ggplotly(q3.pca.plot.segment)
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Q3_animalID.png"), 
+         q3.pca.plot.animalID, 
+         height = 8, 
+         width = 12)
+  
+}
+
+#q3.pca.plot.segment <- biplot(q3.pca.table, 
+#                         colby = "segmentID", 
+#                         legendPosition = "right", 
+#                         legendLabSize = 6, 
+#                         legendIconSize = 3, 
+#                         lab = NULL,
+#                         title = "Q3 Normalization", 
+#                         subtitle = "NTCs removed")
+#
+#ggplotly(q3.pca.plot.segment)
 
 ```
 
-```{r PCA for Negative segment, fig.width=12, fig.height=8}
-#| label: fig-PCAsegmentNeg
+```{r PCA for Negative Animal ID, fig.width=12, fig.height=8}
+#| label: fig-PCAanimalIDNeg
 #| fig-cap: "PCA colored by Animal_ID for Negative Normalization"
 #| warning: false
 
-neg.pca.plot.segment <- biplot(neg.pca.table, 
+neg.pca.plot.animalID <- biplot(neg.pca.table, 
                          colby = "Animal_ID", 
                          legendPosition = "right", 
                          legendLabSize = 6, 
@@ -1118,16 +1193,28 @@ neg.pca.plot.segment <- biplot(neg.pca.table,
                          title = "Negative Normalization", 
                          subtitle = "NTCs removed")
 
-print(neg.pca.plot.segment)
+print(neg.pca.plot.animalID)
+
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Neg_animalID.png"), 
+         neg.pca.plot.animalID, 
+         height = 8, 
+         width = 12)
+  
+}
+
 
 ```
 
-```{r PCA for Quant segment, fig.width=12, fig.height=8}
-#| label: fig-PCAsegmentQuant
-#| fig-cap: "PCA colored by Segment for Quantile Normalization"
+```{r PCA for Quant animal ID, fig.width=12, fig.height=8}
+#| label: fig-PCAanimalIDQuant
+#| fig-cap: "PCA colored by animal ID for Quantile Normalization"
 #| warning: false
 
-quant.pca.plot.segment <- biplot(quant.pca.table, 
+quant.pca.plot.animalID <- biplot(quant.pca.table, 
                          colby = "Animal_ID", 
                          legendPosition = "right", 
                          legendLabSize = 6, 
@@ -1136,7 +1223,18 @@ quant.pca.plot.segment <- biplot(quant.pca.table,
                          title = "Quantile Normalization", 
                          subtitle = "NTCs removed")
 
-print(quant.pca.plot.segment)
+print(quant.pca.plot.animalID)
+
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Quant_animalID.png"), 
+         quant.pca.plot.animalID, 
+         height = 8, 
+         width = 12)
+  
+}
 
 
 ```
@@ -1160,6 +1258,17 @@ q3.pca.plot.region <- biplot(q3.pca.table,
 
 print(q3.pca.plot.region)
 
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Q3_region.png"), 
+         q3.pca.plot.region, 
+         height = 8, 
+         width = 12)
+  
+}
+
 ```
 
 ```{r PCA for Neg region, fig.width=12, fig.height=8}
@@ -1177,6 +1286,17 @@ neg.pca.plot.region <- biplot(neg.pca.table,
                          subtitle = "NTCs removed")
 
 print(neg.pca.plot.region)
+
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Neg_region.png"), 
+         neg.pca.plot.region, 
+         height = 8, 
+         width = 12)
+  
+}
 
 ```
 
@@ -1196,6 +1316,16 @@ quant.pca.plot.region <- biplot(quant.pca.table,
 
 print(quant.pca.plot.region)
 
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_quant_region.png"), 
+         quant.pca.plot.region, 
+         height = 8, 
+         width = 12)
+  
+}
 
 ```
 
@@ -1217,23 +1347,34 @@ q3.pca.plot.class <- biplot(q3.pca.table,
 
 print(q3.pca.plot.class)
 
-q3.pca.plot.control <- biplot(q3.pca.table, 
-                         colby = "control", 
-                         legendPosition = "right", 
-                         legendLabSize = 10, 
-                         legendIconSize = 5, 
-                         lab = NULL,
-                         title = "Q3 Normalization", 
-                         subtitle = "NTCs removed")
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Q3_class.png"), 
+         q3.pca.plot.class, 
+         height = 8, 
+         width = 12)
+  
+}
 
-print(q3.pca.plot.control)
-
-class.umap <- plot_umap(log.counts = quant.log.counts.df, 
-          annotation = cleaned.annotation.df, 
-          group.field = "Treatment_group", 
-          roi.field = "ROI_ID", 
-          slide.field = "slide_name")
-
+#q3.pca.plot.control <- biplot(q3.pca.table, 
+#                         colby = "control", 
+#                         legendPosition = "right", 
+#                         legendLabSize = 10, 
+#                         legendIconSize = 5, 
+#                         lab = NULL,
+#                         title = "Q3 Normalization", 
+#                         subtitle = "NTCs removed")
+#
+#print(q3.pca.plot.control)
+#
+#class.umap <- plot_umap(log.counts = quant.log.counts.df, 
+#          annotation = cleaned.annotation.df, 
+#          group.field = "Treatment_group", 
+#          roi.field = "ROI_ID", 
+#          slide.field = "slide_name")
+#
 ```
 
 ```{r PCA for Negative class, fig.width=12, fig.height=8}
@@ -1252,16 +1393,27 @@ neg.pca.plot.class <- biplot(neg.pca.table,
 
 print(neg.pca.plot.class)
 
-neg.pca.plot.control <- biplot(neg.pca.table, 
-                         colby = "control", 
-                         legendPosition = "right", 
-                         legendLabSize = 10, 
-                         legendIconSize = 5, 
-                         lab = NULL,
-                         title = "Negative Normalization", 
-                         subtitle = "NTCs removed")
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Neg_class.png"), 
+         neg.pca.plot.class, 
+         height = 8, 
+         width = 12)
+  
+}
 
-print(neg.pca.plot.control)
+#neg.pca.plot.control <- biplot(neg.pca.table, 
+#                         colby = "control", 
+#                         legendPosition = "right", 
+#                         legendLabSize = 10, 
+#                         legendIconSize = 5, 
+#                         lab = NULL,
+#                         title = "Negative Normalization", 
+#                         subtitle = "NTCs removed")
+#
+#print(neg.pca.plot.control)
 
 ```
 
@@ -1281,16 +1433,27 @@ quant.pca.plot.class <- biplot(quant.pca.table,
 
 print(quant.pca.plot.class)
 
-quant.pca.plot.control <- biplot(quant.pca.table, 
-                         colby = "control", 
-                         legendPosition = "right", 
-                         legendLabSize = 10, 
-                         legendIconSize = 5, 
-                         lab = NULL,
-                         title = "Quantile Normalization", 
-                         subtitle = "NTCs removed")
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Quant_class.png"), 
+         quant.pca.plot.class, 
+         height = 8, 
+         width = 12)
+  
+}
 
-print(quant.pca.plot.control)
+#quant.pca.plot.control <- biplot(quant.pca.table, 
+#                         colby = "control", 
+#                         legendPosition = "right", 
+#                         legendLabSize = 10, 
+#                         legendIconSize = 5, 
+#                         lab = NULL,
+#                         title = "Quantile Normalization", 
+#                         subtitle = "NTCs removed")
+#
+#print(quant.pca.plot.control)
 
 ```
 
@@ -1313,15 +1476,26 @@ q3.pca.plot.slide <- biplot(q3.pca.table,
 
 print(q3.pca.plot.slide)
 
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Q3_slide.png"), 
+         q3.pca.plot.slide, 
+         height = 8, 
+         width = 12)
+  
+}
 
-q3.pca.plot.id <- biplot(q3.pca.table, 
-                         colby = "segmentID", 
-                         legendPosition = "right", 
-                         legendLabSize = 10, 
-                         legendIconSize = 5, 
-                         lab = NULL,
-                         title = "Q3 Normalization", 
-                         subtitle = "NTCs removed")
+
+#q3.pca.plot.id <- biplot(q3.pca.table, 
+#                         colby = "segmentID", 
+#                         legendPosition = "right", 
+#                         legendLabSize = 10, 
+#                         legendIconSize = 5, 
+#                         lab = NULL,
+#                         title = "Q3 Normalization", 
+#                         subtitle = "NTCs removed")
 
 ```
 
@@ -1343,6 +1517,17 @@ neg.pca.plot.slide <- biplot(neg.pca.table,
 
 print(neg.pca.plot.slide)
 
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Neg_slide.png"), 
+         neg.pca.plot.slide, 
+         height = 8, 
+         width = 12)
+  
+}
+
 ```
 
 ```{r PCA for Quant slide, fig.width=12, fig.height=8}
@@ -1360,6 +1545,17 @@ quant.pca.plot.slide <- biplot(quant.pca.table,
                          subtitle = "NTCs removed")
 
 print(quant.pca.plot.slide)
+
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Quant_slide.png"), 
+         quant.pca.plot.slide, 
+         height = 8, 
+         width = 12)
+  
+}
 
 
 ```
@@ -1383,6 +1579,17 @@ q3.pca.plot.nuclei <- biplot(q3.pca.table,
 
 print(q3.pca.plot.nuclei)
 
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Q3_nuclei.png"), 
+         q3.pca.plot.nuclei, 
+         height = 8, 
+         width = 12)
+  
+}
+
 
 ```
 
@@ -1401,6 +1608,17 @@ neg.pca.plot.nuclei <- biplot(neg.pca.table,
                          subtitle = "NTCs removed")
 
 print(neg.pca.plot.nuclei)
+
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Neg_nuclei.png"), 
+         neg.pca.plot.nuclei, 
+         height = 8, 
+         width = 12)
+  
+}
 ```
 
 ```{r PCA for Quant nuclei, fig.width=12, fig.height=8}
@@ -1418,6 +1636,17 @@ quant.pca.plot.nuclei <- biplot(quant.pca.table,
                          subtitle = "NTCs removed")
 
 print(quant.pca.plot.nuclei)
+
+if(export.PCA == TRUE){
+  
+  ggsave(paste0(params$results.folder, 
+                params$run.folder, 
+                "PCA/Vessel_PCA_Quant_nuclei.png"), 
+         quant.pca.plot.nuclei, 
+         height = 8, 
+         width = 12)
+  
+}
 
 ```
 
