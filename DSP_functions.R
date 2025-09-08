@@ -20,7 +20,7 @@ subset_counts_for_lmm <- function(counts,
     subset.annotation <- subset.annotation %>% 
       filter(.[[column]] %in% subset.list[[column]])
     
-    subset.IDs <- subset.annotation$Sample_ID
+    subset.IDs <- subset.annotation$sample_ID
     
     subset.columns <- c("gene", subset.IDs)
     
@@ -93,8 +93,6 @@ subset_object_for_lmm <- function(object,
 
 run_limma <- function(counts, 
                       annotation, 
-                      include.slide, 
-                      within.slide, 
                       contrast, 
                       contrast.levels){
   
@@ -102,39 +100,20 @@ run_limma <- function(counts,
   DGE.list <- DGEList(counts = counts, 
                       samples = annotation)
   
-  if(include.slide == FALSE){ 
-    # Create the LM model design
-    design <- model.matrix(formula(paste0("~ 0 + ", contrast)), 
-                           data = DGE.list$samples)
-    
-  } else {
-    
-    if(within.slide == TRUE){ 
-      # For within slide we use a random slope in the mixed effect
-      
-      # Create the LM model design with slide as a mixed effect
-      design <- model.matrix(formula(paste0("~ 1 + ", 
-                                            contrast, 
-                                            " + (1 + " , 
-                                            contrast, 
-                                            " | slide_name)")), 
-                             data = DGE.list$samples)
-      
-    } else{
-      # For between slide we use slide in the mixed effect, no random slope
-      
-      # Create the LM model design with slide as a mixed effect
-      design <- model.matrix(formula(paste0("~ 1 + ", 
-                                            contrast, 
-                                            " + (1 | slide_name)")), 
-                             data = DGE.list$samples)
-    }
-    
-  }
+  # Create the LM model design
+  design <- model.matrix(formula(paste0("~ 0 + ", contrast)), 
+                         data = DGE.list$samples)
   
+  # Gather slide correlation for using random effect
+  corfit <- duplicateCorrelation(DGE.list$counts, 
+                                 design, 
+                                 block = DGE.list$samples$slide_name)
   
-  # Create the fit for the model
-  fit <- lmFit(DGE.list$counts, design)
+  # Fit model with blocking (adjust for slide variance)
+  fit <- lmFit(DGE.list$counts, 
+               design, 
+               block = DGE.list$samples$slide_name, 
+               correlation = corfit$consensus)
   
   # Set up the contrast
   contrast.level.ref <- paste0(contrast, contrast.levels[[1]])
@@ -615,7 +594,8 @@ make_volcano <- function(lmm.results,
       geom_point(size = 2) +
       scale_color_manual(legend.title, 
                          values = contrast.level.colors) + 
-      geom_text_repel(max.overlaps = Inf) + 
+      geom_text_repel(max.overlaps = Inf, 
+                      show.legend = FALSE) + 
       xlim(-log2.scale-1, log2.scale+1) + 
       theme(plot.title = element_text(hjust = 0.5))
     

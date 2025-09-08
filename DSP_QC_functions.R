@@ -291,6 +291,8 @@ upsetr_plot <- function(object,
     
   }
   
+  all.group.values <- all.group.values[!is.na(all.group.values)]
+  
   # Create the upset df with all FALSE values
   upset.df <- as.data.frame(matrix(FALSE, nrow = nrow(pData(object)), 
                                    ncol = length(all.group.values)))
@@ -300,6 +302,8 @@ upsetr_plot <- function(object,
   
   # Subset the annotation for only the relevant columns for upsetr
   anno.subset <- pData(object) %>% select(all_of(annotation.groups))
+  
+  anno.subset <- na.omit(anno.subset)
   
   # For each row in the annotation data, if it contains the value of a column in the upsetr plot mark as TRUE
   for (i in 1:nrow(anno.subset)) {
@@ -498,7 +502,6 @@ gene_detection <- function(object,
     # A master df to hold all feature (gene) detection for facet values
     feature.detect.facet.df <- data.frame(feature = rownames(fData(object)))
     
-    
     # Gather the IDs for each facet value
     for(value in facet.values){
       
@@ -516,12 +519,18 @@ gene_detection <- function(object,
       # Compute the detection for each feature
       value.feature.df <- data.frame(feature = rownames(fData(object)))
       
-      value.feature.df[[value]] <- 100*(rowSums(loq.mat.value, na.rm = TRUE)/total.AOIs)
+      # Check if there are enough AOIs for the value
+      if(length(dim(loq.mat.value)) > 1){
+        
+        value.feature.df[[value]] <- 100*(rowSums(loq.mat.value, na.rm = TRUE)/total.AOIs)
+        
+        # Add the detection per feature for this value to the master df
+        feature.detect.facet.df <- merge(feature.detect.facet.df, 
+                                         value.feature.df, 
+                                         by = "feature")
+        
+      }
       
-      # Add the detection per feature for this value to the master df
-      feature.detect.facet.df <- merge(feature.detect.facet.df, 
-                                       value.feature.df, 
-                                       by = "feature")
     }
     
     # Melt the feature detect facet df for easier ggplot faceting
@@ -940,11 +949,22 @@ plot_umap <- function(log.counts,
 
 make_rle_plot <- function(counts, 
               annotation, 
-              annotation.facet){
+              annotation.facet, 
+              subsample.ammount = 0.2){
   
-  # Convert counts to df and tranform to log
-  counts <- as.data.frame(counts)
-  log.counts <- counts %>%
+  # Down-sample the counts
+  # Set how many rows (gene targets) and column (AOIs) you want
+  n.rows <- subsample.ammount*nrow(counts)
+  n.cols <- subsample.ammount*ncol(counts)
+  
+  # Downsample
+  counts.downsample <- counts[sample(nrow(counts), n.rows), 
+                              sample(ncol(counts), n.cols)]
+  
+  counts.downsample <- as.data.frame(counts.downsample)
+  
+  # Convert to log 2 counts
+  log.counts <- counts.downsample %>%
     mutate(across(everything(), ~ log2(. + 1)))
     
   
@@ -1011,6 +1031,7 @@ nuclei_plot <- function(annotation,
                         color, 
                         facet, 
                         x.axis, 
+                        x.axis.label.shown = TRUE,
                         order.by.ROI.num = FALSE, 
                         nuclei.field.name = 'nuclei'){
 
@@ -1039,22 +1060,37 @@ nuclei_plot <- function(annotation,
   annotation[[x.axis]] <- factor(annotation[[x.axis]], 
                                  levels = unique(annotation[[x.axis]]))
   
-  # Create the nuclei count boxplots
-  nuclei.boxplot <- ggplot(annotation, aes(x = !!sym(x.axis),
-                                           y = !!sym(nuclei.field.name),
-                                           color = !!sym(color))) + 
-    geom_boxplot(notch = FALSE) + 
-    ggtitle(paste0("Nuclei count per AOI")) +
-    scale_y_continuous(labels = scales::comma) + 
-    ylim(y.lower.limit, y.upper.limit) + 
-    labs(x = "AOI_ID", y = "Nuclei count") + 
-    theme(axis.text.x = element_text(size = 8, angle = 90)) + 
-    facet_wrap(as.formula(paste("~", facet)), scales = "free_x")
-  
+  if(x.axis.label.shown){
+    
+    # Create the nuclei count boxplots
+    nuclei.boxplot <- ggplot(annotation, aes(x = !!sym(x.axis),
+                                             y = !!sym(nuclei.field.name),
+                                             color = !!sym(color))) + 
+      geom_boxplot(notch = FALSE) + 
+      ggtitle(paste0("Nuclei count per AOI")) +
+      scale_y_continuous(labels = scales::comma) + 
+      ylim(y.lower.limit, y.upper.limit) + 
+      labs(x = "AOI_ID", y = "Nuclei count") + 
+      theme(axis.text.x = element_text(size = 8, angle = 90)) + 
+      facet_wrap(as.formula(paste("~", facet)), scales = "free_x")
+    
+    
+  } else {
+    
+    nuclei.boxplot <- ggplot(annotation, aes(x = !!sym(x.axis),
+                                             y = !!sym(nuclei.field.name),
+                                             color = !!sym(color))) + 
+      geom_boxplot(notch = FALSE) + 
+      ggtitle(paste0("Nuclei count per AOI")) +
+      scale_y_continuous(labels = scales::comma) + 
+      ylim(y.lower.limit, y.upper.limit) + 
+      labs(x = NULL, y = "Nuclei count") + 
+      theme(axis.text.x = element_blank()) + 
+      facet_wrap(as.formula(paste("~", facet)), scales = "free_x")
+    
+  }
   
   return(nuclei.boxplot)
-  
-  
 }
 
 gene_counts_violin_boxplot <- function(counts, 
